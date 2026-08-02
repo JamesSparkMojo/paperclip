@@ -68,8 +68,22 @@ describe("POST /api/board/chat/conversations (PAP-11123)", () => {
       error: "Conference Room Chat is not enabled",
       code: "FEATURE_DISABLED",
     });
-    // The guard must fire before any authz check or persistence.
-    expect(mockAssertInstanceAdmin).not.toHaveBeenCalled();
+    expect(mockAssertInstanceAdmin).toHaveBeenCalledTimes(1);
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("checks instance-admin access before reading the feature flag", async () => {
+    mockAssertInstanceAdmin.mockImplementationOnce(() => {
+      throw new Error("INSTANCE_ADMIN_REQUIRED");
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/board/chat/conversations")
+      .send({ companyId: "company-1" });
+
+    expect(res.status).toBe(500);
+    expect(mockGetExperimental).not.toHaveBeenCalled();
     expect(mockIssueService.create).not.toHaveBeenCalled();
   });
 
@@ -188,6 +202,21 @@ describe("POST /api/board/chat/conversations (PAP-11123)", () => {
     });
     expect(mockIssueService.getById).toHaveBeenCalledWith("PAP-1");
     expect(mockIssueService.create).not.toHaveBeenCalled();
+  });
+
+  it("checks instance-admin access before reading the feature flag for direct refs", async () => {
+    mockAssertInstanceAdmin.mockImplementationOnce(() => {
+      throw new Error("INSTANCE_ADMIN_REQUIRED");
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .get("/api/board/chat/conversations/PAP-1")
+      .query({ companyId: "company-1" });
+
+    expect(res.status).toBe(500);
+    expect(mockGetExperimental).not.toHaveBeenCalled();
+    expect(mockIssueService.getById).not.toHaveBeenCalled();
   });
 
   it.each([

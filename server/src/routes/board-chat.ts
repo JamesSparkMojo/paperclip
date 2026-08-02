@@ -130,6 +130,8 @@ export function boardChatRoutes(
   // admin + company access. There is no
   // deployment-mode restriction, since nothing is spawned here.
   router.post("/board/chat/conversations", async (req, res) => {
+    assertInstanceAdmin(req);
+
     const experimental = await instanceSettingsService(db).getExperimental();
     if (experimental.enableConferenceRoomChat !== true) {
       res.status(403).json({
@@ -149,7 +151,6 @@ export function boardChatRoutes(
       return;
     }
 
-    assertInstanceAdmin(req);
     assertCompanyAccess(req, companyId);
 
     const actor = getActorInfo(req);
@@ -168,6 +169,8 @@ export function boardChatRoutes(
   // create or redirect: invalid direct links need a visible unavailable state
   // while valid UUID links can be canonicalized client-side to identifiers.
   router.get("/board/chat/conversations/:conversationRef", async (req, res) => {
+    assertInstanceAdmin(req);
+
     const experimental = await instanceSettingsService(db).getExperimental();
     if (experimental.enableConferenceRoomChat !== true) {
       res.status(403).json({
@@ -183,7 +186,6 @@ export function boardChatRoutes(
       return;
     }
 
-    assertInstanceAdmin(req);
     assertCompanyAccess(req, companyId);
 
     const issue = await issueService(db).getById(req.params.conversationRef as string);

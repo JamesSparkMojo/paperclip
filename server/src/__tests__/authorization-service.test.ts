@@ -1492,6 +1492,39 @@ describeEmbeddedPostgres("authorization service", () => {
     expect(sessionDecision).toMatchObject({ allowed: true, reason: "allow_instance_admin" });
   });
 
+  it("trusts the computed isInstanceAdmin flag on cloud_tenant actors", async () => {
+    // The trusted-header resolver is the only code path that can set
+    // isInstanceAdmin on a cloud_tenant actor (stack owner +
+    // enableOwnerInstanceAdmin). The authorization service must honor the
+    // computed flag without consulting instance_user_roles.
+    const tenantCompany = await createCompany(db, "CloudTenantOwnerAdmin");
+    const otherCompany = await createCompany(db, "CloudTenantOwnerAdminOther");
+    const userId = `user-${randomUUID()}`;
+    const targetAgent = await createAgent(db, otherCompany.id, { role: "engineer" });
+    await db.insert(companyMemberships).values({
+      companyId: tenantCompany.id,
+      principalType: "user",
+      principalId: userId,
+      status: "active",
+      membershipRole: "owner",
+    });
+    // Deliberately NO instanceUserRoles row: elevation is computed, not stored.
+
+    const decision = await authorizationService(db).decide({
+      actor: {
+        type: "board",
+        userId,
+        companyIds: [tenantCompany.id],
+        isInstanceAdmin: true,
+        source: "cloud_tenant",
+      },
+      action: "tasks:assign",
+      resource: { type: "issue", companyId: otherCompany.id, assigneeAgentId: targetAgent.id },
+      scope: { assigneeAgentId: targetAgent.id },
+    });
+    expect(decision).toMatchObject({ allowed: true, reason: "allow_instance_admin" });
+  });
+
   it("denies simple-mode assignment to a target agent from another company", async () => {
     const sourceCompany = await createCompany(db, "AssignmentSource");
     const targetCompany = await createCompany(db, "AssignmentTarget");
@@ -1701,7 +1734,7 @@ describeEmbeddedPostgres("authorization service", () => {
     });
   });
 
-  it("scopes task bridge keys away from company-wide reads and unrelated issue writes", async () => {
+  it("scopes task bridge JWTs away from company-wide reads and unrelated issue writes", async () => {
     const company = await createCompany(db, "TaskBridge");
     const bridgeAgent = await createAgent(db, company.id);
     const targetAgent = await createAgent(db, company.id);
@@ -1718,7 +1751,7 @@ describeEmbeddedPostgres("authorization service", () => {
       type: "agent" as const,
       agentId: bridgeAgent.id,
       companyId: company.id,
-      source: "agent_key" as const,
+      source: "agent_jwt" as const,
       keyId,
       keyScope: {
         kind: "task_bridge" as const,

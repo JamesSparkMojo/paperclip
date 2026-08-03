@@ -102,6 +102,11 @@ export function useOnboardingFlow(initial?: Partial<CreatedOnboardingEntities>) 
 
   const [adapterEnvResult, setAdapterEnvResult] =
     useState<AdapterEnvironmentTestResult | null>(null);
+  // Which adapter type `adapterEnvResult` was produced for. The result is only
+  // reusable for that same adapter — otherwise switching adapters would let a
+  // pass from the previous one stand in for the new one, and hire an agent on
+  // an adapter that was never probed.
+  const [adapterEnvResultType, setAdapterEnvResultType] = useState<string | null>(null);
   const [adapterEnvError, setAdapterEnvError] = useState<string | null>(null);
   const [adapterEnvLoading, setAdapterEnvLoading] = useState(false);
   const [forceUnsetAnthropicApiKey, setForceUnsetAnthropicApiKey] = useState(false);
@@ -172,6 +177,7 @@ export function useOnboardingFlow(initial?: Partial<CreatedOnboardingEntities>) 
         adapterConfig: adapterConfigOverride ?? buildAdapterConfig(adapter),
       });
       setAdapterEnvResult(result);
+      setAdapterEnvResultType(adapter.adapterType);
       return result;
     } catch (err) {
       setAdapterEnvError(
@@ -246,7 +252,9 @@ export function useOnboardingFlow(initial?: Partial<CreatedOnboardingEntities>) 
     setError(null);
     try {
       if (input.requireEnvProbe) {
-        const result = adapterEnvResult ?? (await runAdapterEnvironmentTest(input.adapter));
+        const cached =
+          adapterEnvResultType === input.adapter.adapterType ? adapterEnvResult : null;
+        const result = cached ?? (await runAdapterEnvironmentTest(input.adapter));
         if (!result) return null;
       }
 
@@ -393,6 +401,7 @@ export function useOnboardingFlow(initial?: Partial<CreatedOnboardingEntities>) 
     setLoading(false);
     setError(null);
     setAdapterEnvResult(null);
+    setAdapterEnvResultType(null);
     setAdapterEnvError(null);
     setAdapterEnvLoading(false);
     setForceUnsetAnthropicApiKey(false);

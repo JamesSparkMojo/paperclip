@@ -4,6 +4,8 @@ import { cn } from "@/lib/utils";
 import { listUIAdapters } from "@/adapters";
 import { getAdapterDisplay } from "@/adapters/adapter-display-registry";
 import { isVisualAdapterChoice } from "@/adapters/metadata";
+import { useDisabledAdaptersSync } from "@/adapters/use-disabled-adapters";
+import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -19,9 +21,14 @@ import { capsuleHandoffExit, capsuleHeroMotion } from "../onboarding-motion";
 
 const SYSTEM_ADAPTER_TYPES = new Set(["process", "http"]);
 
-function visualAdapters() {
+function visualAdapters(disabledTypes: Set<string>) {
   return listUIAdapters()
-    .filter((a) => !SYSTEM_ADAPTER_TYPES.has(a.type) && isVisualAdapterChoice(a.type))
+    .filter(
+      (a) =>
+        !SYSTEM_ADAPTER_TYPES.has(a.type) &&
+        !disabledTypes.has(a.type) &&
+        isVisualAdapterChoice(a.type),
+    )
     .map((a) => ({ ...getAdapterDisplay(a.type), type: a.type }))
     .filter((a) => !a.comingSoon);
 }
@@ -52,14 +59,19 @@ export function AdapterStep({
   step: number;
   total?: number;
 }) {
+  // Server-disabled adapter types are filtered out so the flow never offers an
+  // adapter the instance has turned off. Unlike the retired wizard (mounted
+  // globally, so it had to gate this on visibility), this step only mounts when
+  // it is on screen.
+  const disabledTypes = useDisabledAdaptersSync();
   const { recommended, additional } = useMemo(() => {
-    const all = visualAdapters();
+    const all = visualAdapters(disabledTypes);
     return {
       recommended: all.filter((a) => a.recommended),
       // Top handful of other models beyond the recommended ones.
       additional: all.filter((a) => !a.recommended).slice(0, 5),
     };
-  }, []);
+  }, [disabledTypes]);
 
   // The dropdown reflects the selection only when it isn't one of the cards.
   const additionalValue = additional.some((a) => a.type === adapterType) ? adapterType : undefined;
@@ -97,9 +109,12 @@ export function AdapterStep({
                     : "border-border hover:border-muted-foreground",
                 )}
               >
-                <span className="absolute -top-1.5 right-1.5 rounded-full bg-green-500 px-1.5 py-0.5 text-(length:--text-nano) font-semibold leading-none text-white">
+                <Badge
+                  variant="ghost"
+                  className="absolute -top-1.5 right-1.5 bg-green-500 px-1.5 text-(length:--text-nano) font-semibold leading-none text-white"
+                >
                   Recommended
-                </span>
+                </Badge>
                 <opt.icon className="size-4" />
                 <span className="font-medium">{opt.label}</span>
                 <span className="text-(length:--text-nano) text-muted-foreground">

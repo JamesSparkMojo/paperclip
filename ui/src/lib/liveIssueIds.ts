@@ -21,17 +21,41 @@ export function isLiveIssueRun(
 export interface LiveIssueStatusNode {
   id: string;
   status: IssueStatus | string;
+  updatedAt?: Date | string | number | null;
 }
 
 function collectIssueStatusById(issues: readonly LiveIssueStatusNode[] | null | undefined): Map<string, string> {
-  const statusByIssueId = new Map<string, string>();
+  const snapshotByIssueId = new Map<string, { status: string; updatedAtMs: number | null }>();
   for (const issue of issues ?? []) {
-    const existingStatus = statusByIssueId.get(issue.id);
-    if (!isTerminalIssueStatus(existingStatus)) {
-      statusByIssueId.set(issue.id, issue.status);
-    }
+    const candidate = {
+      status: issue.status,
+      updatedAtMs: issueUpdatedAtMs(issue.updatedAt),
+    };
+    const existing = snapshotByIssueId.get(issue.id);
+    if (!existing || shouldReplaceIssueStatusSnapshot(existing, candidate)) snapshotByIssueId.set(issue.id, candidate);
   }
-  return statusByIssueId;
+  return new Map([...snapshotByIssueId].map(([issueId, snapshot]) => [issueId, snapshot.status]));
+}
+
+function issueUpdatedAtMs(updatedAt: LiveIssueStatusNode["updatedAt"]): number | null {
+  if (updatedAt === null || updatedAt === undefined) return null;
+  const timestamp = updatedAt instanceof Date ? updatedAt.getTime() : new Date(updatedAt).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function shouldReplaceIssueStatusSnapshot(
+  existing: { status: string; updatedAtMs: number | null },
+  candidate: { status: string; updatedAtMs: number | null },
+): boolean {
+  if (candidate.updatedAtMs !== null && existing.updatedAtMs !== null) {
+    if (candidate.updatedAtMs !== existing.updatedAtMs) return candidate.updatedAtMs > existing.updatedAtMs;
+  } else if (candidate.updatedAtMs !== null) {
+    return true;
+  } else if (existing.updatedAtMs !== null) {
+    return false;
+  }
+
+  return !isTerminalIssueStatus(existing.status) && isTerminalIssueStatus(candidate.status);
 }
 
 export function collectLiveIssueIds(

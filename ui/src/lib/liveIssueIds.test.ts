@@ -128,7 +128,7 @@ describe("collectLiveIssueIds", () => {
     ])]).toEqual(["issue-open"]);
   });
 
-  it("keeps terminal snapshots sticky when stale non-terminal snapshots appear later", () => {
+  it("keeps newer terminal snapshots authoritative when stale non-terminal snapshots appear later", () => {
     const liveRuns: LiveRunForIssue[] = [
       liveRun({ id: "run-done", issueId: "issue-done", status: "running" }),
       liveRun({ id: "run-cancelled", issueId: "issue-cancelled", status: "queued" }),
@@ -136,12 +136,26 @@ describe("collectLiveIssueIds", () => {
     ];
 
     expect([...collectLiveIssueIds(liveRuns, [
-      { id: "issue-done", status: "done" },
-      { id: "issue-cancelled", status: "cancelled" },
-      { id: "issue-open", status: "in_progress" },
-      { id: "issue-done", status: "in_progress" },
-      { id: "issue-cancelled", status: "todo" },
+      { id: "issue-done", status: "done", updatedAt: "2026-04-20T10:02:00.000Z" },
+      { id: "issue-cancelled", status: "cancelled", updatedAt: "2026-04-20T10:02:00.000Z" },
+      { id: "issue-open", status: "in_progress", updatedAt: "2026-04-20T10:02:00.000Z" },
+      { id: "issue-done", status: "in_progress", updatedAt: "2026-04-20T10:01:00.000Z" },
+      { id: "issue-cancelled", status: "todo", updatedAt: "2026-04-20T10:01:00.000Z" },
     ])]).toEqual(["issue-open"]);
+  });
+
+  it("allows a newer non-terminal snapshot to reopen an issue with a stale terminal snapshot", () => {
+    const liveRuns: LiveRunForIssue[] = [
+      liveRun({ id: "run-reopened", issueId: "issue-reopened", status: "running" }),
+      liveRun({ id: "run-terminal", issueId: "issue-terminal", status: "queued" }),
+    ];
+
+    expect([...collectLiveIssueIds(liveRuns, [
+      { id: "issue-reopened", status: "done", updatedAt: "2026-04-20T10:01:00.000Z" },
+      { id: "issue-terminal", status: "in_progress", updatedAt: "2026-04-20T10:01:00.000Z" },
+      { id: "issue-reopened", status: "in_progress", updatedAt: "2026-04-20T10:02:00.000Z" },
+      { id: "issue-terminal", status: "done", updatedAt: "2026-04-20T10:02:00.000Z" },
+    ])]).toEqual(["issue-reopened"]);
   });
 });
 

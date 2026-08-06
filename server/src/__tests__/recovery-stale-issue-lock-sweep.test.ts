@@ -308,4 +308,70 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
       .then((rows) => rows[0]?.status);
     expect(runStatus).toBe("running");
   });
+
+  it("still clears the lock when the audit write fails after terminalization", async () => {
+    const { companyId, agentId, runningRunId } = await seed();
+    // The run recorded a pid that never maps to a live process, so the sweep
+    // decides to terminalize it. See the orphaned-run test above.
+    await db
+      .update(heartbeatRuns)
+      .set({ processPid: 2_000_000_000 })
+      .where(eq(heartbeatRuns.id, runningRunId));
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Audit write fails — still clear the lock",
+      status: "done",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: runningRunId,
+      executionRunId: runningRunId,
+      executionLockedAt: new Date(),
+    });
+
+    // Make only the audit-event insert fail. The run update commits the
+    // terminal status first, so the audit write is best-effort. The sweep must
+    // catch the failure and still clear the lock.
+    const realInsert = db.insert.bind(db);
+    const insertSpy = vi.spyOn(db, "insert").mockImplementation((table) => {
+      if (table === heartbeatRunEvents) {
+        throw new Error("simulated audit write failure");
+      }
+      return realInsert(table);
+    });
+
+    try {
+      const heartbeat = heartbeatService(db);
+      const result = await heartbeat.sweepStaleIssueLocks();
+
+      expect(result.terminalizedRunIds).toEqual([runningRunId]);
+      expect(result.cleared).toBe(1);
+    } finally {
+      insertSpy.mockRestore();
+    }
+
+    // The run reached its terminal status even though the audit write failed.
+    const runStatus = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runningRunId))
+      .then((rows) => rows[0]?.status);
+    expect(runStatus).toBe("interrupted");
+
+    // The sweep cleared the lock in the same pass.
+    const lock = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(lock).toEqual({ checkoutRunId: null, executionRunId: null });
+
+    // The audit write failed, so no run event exists for this run.
+    const events = await db
+      .select({ id: heartbeatRunEvents.id })
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, runningRunId));
+    expect(events).toEqual([]);
+  });
 });

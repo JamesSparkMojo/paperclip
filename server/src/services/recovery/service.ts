@@ -5535,16 +5535,28 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }
 
     runningProcesses.delete(run.id);
-    await appendRecoveryRunEvent(updated, {
-      level: "warn",
-      message,
-      payload: {
-        source: "recovery.sweep_stale_issue_locks",
-        previousStatus: run.status,
-        pid,
-        processGroupId,
-      },
-    });
+    // The run update above already committed the terminal status. The audit
+    // event is best-effort: if the insert fails, the caller must still treat
+    // the run as terminalized and clear the lock in the same sweep. So catch
+    // the failure, log it, and continue. A thrown error here would abort the
+    // sweep and leave the stale lock in place.
+    try {
+      await appendRecoveryRunEvent(updated, {
+        level: "warn",
+        message,
+        payload: {
+          source: "recovery.sweep_stale_issue_locks",
+          previousStatus: run.status,
+          pid,
+          processGroupId,
+        },
+      });
+    } catch (error) {
+      logger.error(
+        { err: error, runId: run.id, previousStatus: run.status },
+        "failed to append recovery run event after terminalizing orphaned run; run stays terminal and the sweep clears the lock",
+      );
+    }
     logger.warn(
       { runId: run.id, previousStatus: run.status, pid, processGroupId },
       "terminalized orphaned running heartbeat run in stale-lock sweep",

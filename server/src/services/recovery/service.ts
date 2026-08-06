@@ -5477,48 +5477,101 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return Math.max(1, Math.floor(asNumber(raw, fallback)));
   }
 
-  // Backstop reconciler: terminalizes a "running" run after its process and its
-  // sandbox are both gone. A hard server crash can skip the graceful teardown,
-  // so the run finalizer never writes the terminal status and
-  // heartbeat_runs.status stays "running" forever. The UI reads liveness from
-  // that row, so the task shows "Live" forever. This function forces the run to
-  // "interrupted" and records a run event, so the state is auditable. It never
-  // overwrites a status that another path already made terminal, and it never
-  // terminalizes a run whose process is still alive.
+  // Backstop reconciler: terminalizes a "running" run that can no longer reach a
+  // terminal status on its own. The run finalizer writes the terminal status in
+  // a step that is separate from the agent status=done PATCH. When the teardown
+  // stops between the two steps, heartbeat_runs.status stays "running" forever.
+  // The UI reads liveness from that row, so the task shows "Live" forever. This
+  // function forces the run to a terminal status and records a run event, so the
+  // state is auditable. It never overwrites a status that another path already
+  // made terminal.
+  //
+  // Two independent authorities terminalize the run. Either one is enough:
+  //
+  // - Issue-terminal authority: the run's issue already reached a terminal
+  //   status (done or cancelled), but the run row is still "running". A healthy
+  //   run always terminalizes its own row before or just after the issue reaches
+  //   a terminal status, so a lasting "running" row under a terminal issue is
+  //   orphaned. This authority does not depend on process death. It is the only
+  //   authority that catches the reuse-lease path: the release stops the sandbox
+  //   but keeps the server process alive, so the in-memory handle and the
+  //   recorded pid can both persist.
+  // - Process-death authority: the run has no in-memory handle and its recorded
+  //   process and process group are both gone. This catches a hard server crash
+  //   that skipped the graceful teardown, even when the issue is not terminal.
   async function terminalizeOrphanedRunningRun(
     run: typeof heartbeatRuns.$inferSelect,
+    options?: {
+      // The terminal run status implied by a referencing issue. The caller
+      // passes it when it already knows the issue that holds the run in a lock
+      // column. It maps issue "done" to "succeeded" and issue "cancelled" to
+      // "cancelled". A null value means the referencing issue is not terminal.
+      referencingIssueTerminalStatus?: "succeeded" | "cancelled" | null;
+    },
   ): Promise<{ terminalized: boolean; status: string }> {
     // Act only on a run in "running" status. A "queued" run has no process yet,
     // and a "scheduled_retry" run has no process on purpose because it waits to
     // retry. Neither is orphaned, so this function must not terminalize them.
     if (run.status !== "running") return { terminalized: false, status: run.status };
 
-    // The run is live only when a process still backs it. Check the in-memory
-    // handle first, then the recorded pid and process group. Require recorded
-    // process metadata, so this never terminalizes a run that has not yet
-    // stored its pid.
-    const handle = runningProcesses.get(run.id);
-    if (handle) return { terminalized: false, status: run.status };
     const pid = run.processPid ?? null;
     const processGroupId = run.processGroupId ?? null;
-    if (typeof pid !== "number" && typeof processGroupId !== "number") {
+
+    // Issue-terminal authority. When the run's issue is terminal, the run row is
+    // orphaned regardless of process or handle state. Prefer the referencing
+    // issue status that the caller passed, because a lock column is the direct
+    // link from the stuck "Live" issue to this run. Fall back to the issue id in
+    // the run context snapshot when the caller passed nothing.
+    let issueTerminalStatus: "succeeded" | "cancelled" | null =
+      options?.referencingIssueTerminalStatus ?? null;
+    const issueId = issueIdFromRunContext(run.contextSnapshot);
+    if (!issueTerminalStatus && issueId) {
+      const issueStatus = await db
+        .select({ status: issues.status })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0]?.status ?? null);
+      if (issueStatus === "done") issueTerminalStatus = "succeeded";
+      else if (issueStatus === "cancelled") issueTerminalStatus = "cancelled";
+    }
+
+    // Process-death authority. The run is live only when a process still backs
+    // it. Check the in-memory handle first, then the recorded pid and process
+    // group. Require recorded process metadata, so this authority never fires on
+    // a run that has not yet stored its pid.
+    let processGone = false;
+    if (!runningProcesses.get(run.id)) {
+      if (typeof pid === "number" || typeof processGroupId === "number") {
+        const processAlive =
+          (typeof pid === "number" && isPidAlive(pid)) ||
+          (typeof processGroupId === "number" && isProcessGroupAlive(processGroupId));
+        processGone = !processAlive;
+      }
+    }
+
+    // Neither authority applies. The run is still live, so leave it alone.
+    if (!issueTerminalStatus && !processGone) {
       return { terminalized: false, status: run.status };
     }
-    const processAlive =
-      (typeof pid === "number" && isPidAlive(pid)) ||
-      (typeof processGroupId === "number" && isProcessGroupAlive(processGroupId));
-    if (processAlive) return { terminalized: false, status: run.status };
+
+    const authority = issueTerminalStatus ? "issue_terminal" : "process_gone";
+    const terminalStatus = issueTerminalStatus ?? "interrupted";
+    const errorCode = issueTerminalStatus
+      ? "orphaned_running_run_issue_terminal"
+      : "orphaned_running_run";
+    const message =
+      authority === "issue_terminal"
+        ? "run terminalized by recovery backstop: issue reached a terminal status while heartbeat_runs.status stayed live"
+        : "run terminalized by recovery backstop: process and sandbox gone while heartbeat_runs.status stayed live";
 
     const now = new Date();
-    const message =
-      "run terminalized by recovery backstop: process and sandbox gone while heartbeat_runs.status stayed live";
     const updated = await db
       .update(heartbeatRuns)
       .set({
-        status: "interrupted",
-        finishedAt: now,
-        error: run.error ?? message,
-        errorCode: run.errorCode ?? "orphaned_running_run",
+        status: terminalStatus,
+        finishedAt: run.finishedAt ?? now,
+        error: run.error ?? (terminalStatus === "interrupted" ? message : null),
+        errorCode: run.errorCode ?? (terminalStatus === "interrupted" ? errorCode : null),
         updatedAt: now,
       })
       .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")))
@@ -5546,7 +5599,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         message,
         payload: {
           source: "recovery.sweep_stale_issue_locks",
+          authority,
           previousStatus: run.status,
+          terminalStatus,
+          ...(issueId ? { issueId } : {}),
           pid,
           processGroupId,
         },
@@ -5558,7 +5614,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       );
     }
     logger.warn(
-      { runId: run.id, previousStatus: run.status, pid, processGroupId },
+      { runId: run.id, authority, previousStatus: run.status, terminalStatus, issueId, pid, processGroupId },
       "terminalized orphaned running heartbeat run in stale-lock sweep",
     );
     return { terminalized: true, status: updated.status };
@@ -5569,9 +5625,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   // in a terminal status. Provides self-heal for stale locks that fell outside
   // releaseIssueExecutionAndPromote / clearCheckoutRunIfTerminal / adoption.
   // Before it evaluates cleanability, it terminalizes any referenced run that
-  // still claims to be live but whose process and sandbox are both gone, so a
-  // stuck "running" run can no longer block the sweep. Idempotent and safe:
-  // clears at most one row's worth of lock columns per candidate.
+  // still claims to be live but can no longer reach a terminal status on its
+  // own, so a stuck "running" run can no longer block the sweep. Idempotent and
+  // safe: clears at most one row's worth of lock columns per candidate.
   async function sweepStaleIssueLocks() {
     const result = {
       cleared: 0,
@@ -5583,6 +5639,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .select({
         id: issues.id,
         companyId: issues.companyId,
+        status: issues.status,
         checkoutRunId: issues.checkoutRunId,
         executionRunId: issues.executionRunId,
       })
@@ -5608,12 +5665,33 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const runStatusById = new Map<string, string>();
     for (const row of runRows) runStatusById.set(row.id, row.status);
 
+    // Map each referenced run to the terminal run status implied by its
+    // referencing issue. When a terminal issue still holds the run in a lock
+    // column, that run is orphaned: the issue is the stuck "Live" task the UI
+    // shows. A "done" issue implies "succeeded"; a "cancelled" issue implies
+    // "cancelled".
+    const issueTerminalStatusByRunId = new Map<string, "succeeded" | "cancelled">();
+    for (const issue of candidates) {
+      const implied =
+        issue.status === "done"
+          ? "succeeded"
+          : issue.status === "cancelled"
+            ? "cancelled"
+            : null;
+      if (!implied) continue;
+      for (const runId of [issue.checkoutRunId, issue.executionRunId]) {
+        if (runId) issueTerminalStatusByRunId.set(runId, implied);
+      }
+    }
+
     // Pre-pass: terminalize any referenced run that still claims to be live but
-    // whose process and sandbox are both gone. This lets the sweep clear the
-    // lock in the same pass instead of waiting for the run to reach a terminal
-    // status by another route.
+    // can no longer reach a terminal status on its own. This lets the sweep
+    // clear the lock in the same pass instead of waiting for the run to reach a
+    // terminal status by another route.
     for (const row of runRows) {
-      const outcome = await terminalizeOrphanedRunningRun(row);
+      const outcome = await terminalizeOrphanedRunningRun(row, {
+        referencingIssueTerminalStatus: issueTerminalStatusByRunId.get(row.id) ?? null,
+      });
       runStatusById.set(row.id, outcome.status);
       if (outcome.terminalized) result.terminalizedRunIds.push(row.id);
     }

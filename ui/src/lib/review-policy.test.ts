@@ -31,6 +31,15 @@ describe("policy copy", () => {
     expect(issueReviewPolicyCopy("human_only").label).toBe("People only");
   });
 
+  // The settings row is narrow, so its value is a noun fragment that leans on
+  // the row label. None of the three may truncate at phone width.
+  it("keeps every row value short enough for a narrow panel", () => {
+    expect(issueReviewPolicyCopy(null).triggerLabel).toBe("Anyone");
+    for (const option of ISSUE_REVIEW_POLICY_OPTIONS) {
+      expect(option.triggerLabel.length).toBeLessThanOrEqual("Not the requester".length);
+    }
+  });
+
   it("states who may give the verdict on each policy", () => {
     expect(issueReviewPolicyCopy(null).approverCopy).toContain("Anyone with write access");
     expect(issueReviewPolicyCopy("not_creator").approverCopy).toContain("other than the requester");

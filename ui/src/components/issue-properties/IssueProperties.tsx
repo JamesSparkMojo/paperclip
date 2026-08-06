@@ -817,11 +817,11 @@ export function IssueProperties({
       <reviewPolicyDetails.Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
       <span
         className={cn("text-sm truncate min-w-0", reviewPolicy === "anyone" && "text-muted-foreground")}
-        // The label truncates in a narrow panel, so the tooltip has to carry it
-        // as well as the rule — otherwise "Anyone can appro…" is unrecoverable.
+        // `title` never fires on touch, so the picker is the real recovery path.
+        // It still carries the full label and the rule for pointer users.
         title={`${reviewPolicyDetails.label} — ${reviewPolicyDetails.description}`}
       >
-        {reviewPolicyDetails.label}
+        {reviewPolicyDetails.triggerLabel}
       </span>
     </>
   );

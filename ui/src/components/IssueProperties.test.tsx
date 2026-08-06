@@ -2706,8 +2706,10 @@ describe("IssueProperties", () => {
 
     const trigger = findRowTrigger(container, "Review policy");
     expect(trigger).toBeTruthy();
-    expect(trigger?.textContent).toContain("Anyone can approve");
+    // The row shows the short noun fragment; the full label is in the picker.
+    expect(trigger?.textContent).toContain("Anyone");
     expect(trigger?.textContent).not.toContain("None");
+    expect(trigger?.querySelector("[title]")?.getAttribute("title")).toContain("Anyone can approve");
 
     act(() => root.unmount());
   });

@@ -1,4 +1,4 @@
-import { Users, UserMinus, UserRound, type LucideIcon } from "lucide-react";
+import { Users, UserMinus, UserCheck, type LucideIcon } from "lucide-react";
 import { ISSUE_REVIEW_POLICIES, type IssueReviewPolicy } from "@paperclipai/shared";
 
 /**
@@ -23,8 +23,14 @@ const DEFAULT_ISSUE_REVIEW_POLICY: IssueReviewPolicy = "anyone";
 
 export interface IssueReviewPolicyCopy {
   value: IssueReviewPolicy;
-  /** Short label for the settings trigger. */
+  /** Full label for the picker option. */
   label: string;
+  /**
+   * Value shown on the settings row, which is narrow. A noun fragment that
+   * leans on the "Review policy" row label, so the three values read in
+   * parallel and none of them truncates at phone width (design review).
+   */
+  triggerLabel: string;
   /** Mid-sentence wording for activity lines and change receipts. */
   valueLabel: string;
   /** One line explaining the rule, shown under the label in the picker. */
@@ -38,6 +44,7 @@ const COPY: Record<IssueReviewPolicy, IssueReviewPolicyCopy> = {
   anyone: {
     value: "anyone",
     label: "Anyone can approve",
+    triggerLabel: "Anyone",
     valueLabel: "anyone",
     description: "Each person and each agent with write access can approve, including the agent that did the work.",
     approverCopy: "Anyone with write access can approve — people and agents alike.",
@@ -46,6 +53,7 @@ const COPY: Record<IssueReviewPolicy, IssueReviewPolicyCopy> = {
   not_creator: {
     value: "not_creator",
     label: "Not the requester",
+    triggerLabel: "Not the requester",
     valueLabel: "not the requester",
     description: "The reviewer must not be the one who asked for the review.",
     approverCopy: "Requires a reviewer other than the requester.",
@@ -54,10 +62,11 @@ const COPY: Record<IssueReviewPolicy, IssueReviewPolicyCopy> = {
   human_only: {
     value: "human_only",
     label: "People only",
+    triggerLabel: "People only",
     valueLabel: "people only",
     description: "Only a person can approve. Agents cannot give the verdict.",
     approverCopy: "Requires a human. Agents cannot approve this review.",
-    Icon: UserRound,
+    Icon: UserCheck,
   },
 };
 

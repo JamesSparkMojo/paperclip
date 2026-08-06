@@ -2,6 +2,23 @@ import { describe, expect, it } from "vitest";
 import type { LiveRunForIssue } from "../api/heartbeats";
 import { collectLiveIssueIds, collectSubtreeLiveCounts } from "./liveIssueIds";
 
+function liveRun(overrides: Partial<LiveRunForIssue>): LiveRunForIssue {
+  return {
+    id: "run",
+    status: "running",
+    invocationSource: "scheduler",
+    triggerDetail: null,
+    startedAt: "2026-04-20T10:00:00.000Z",
+    finishedAt: null,
+    createdAt: "2026-04-20T10:00:00.000Z",
+    agentId: "agent",
+    agentName: "Agent",
+    adapterType: "codex_local",
+    issueId: "issue",
+    ...overrides,
+  };
+}
+
 describe("collectLiveIssueIds", () => {
   it("keeps only runs linked to issues", () => {
     const liveRuns: LiveRunForIssue[] = [
@@ -108,6 +125,22 @@ describe("collectLiveIssueIds", () => {
     expect([...collectLiveIssueIds(liveRuns, [
       { id: "issue-done", status: "done" },
       { id: "issue-open", status: "in_progress" },
+    ])]).toEqual(["issue-open"]);
+  });
+
+  it("keeps terminal snapshots sticky when stale non-terminal snapshots appear later", () => {
+    const liveRuns: LiveRunForIssue[] = [
+      liveRun({ id: "run-done", issueId: "issue-done", status: "running" }),
+      liveRun({ id: "run-cancelled", issueId: "issue-cancelled", status: "queued" }),
+      liveRun({ id: "run-open", issueId: "issue-open", status: "running" }),
+    ];
+
+    expect([...collectLiveIssueIds(liveRuns, [
+      { id: "issue-done", status: "done" },
+      { id: "issue-cancelled", status: "cancelled" },
+      { id: "issue-open", status: "in_progress" },
+      { id: "issue-done", status: "in_progress" },
+      { id: "issue-cancelled", status: "todo" },
     ])]).toEqual(["issue-open"]);
   });
 });

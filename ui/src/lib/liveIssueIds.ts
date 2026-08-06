@@ -23,12 +23,23 @@ export interface LiveIssueStatusNode {
   status: IssueStatus | string;
 }
 
+function collectIssueStatusById(issues: readonly LiveIssueStatusNode[] | null | undefined): Map<string, string> {
+  const statusByIssueId = new Map<string, string>();
+  for (const issue of issues ?? []) {
+    const existingStatus = statusByIssueId.get(issue.id);
+    if (!isTerminalIssueStatus(existingStatus)) {
+      statusByIssueId.set(issue.id, issue.status);
+    }
+  }
+  return statusByIssueId;
+}
+
 export function collectLiveIssueIds(
   liveRuns: readonly LiveRunForIssue[] | null | undefined,
   issues?: readonly LiveIssueStatusNode[] | null,
 ): Set<string> {
   const ids = new Set<string>();
-  const statusByIssueId = new Map((issues ?? []).map((issue) => [issue.id, issue.status]));
+  const statusByIssueId = collectIssueStatusById(issues);
   for (const run of liveRuns ?? []) {
     if (run.issueId && isLiveIssueRun(run, statusByIssueId.get(run.issueId))) ids.add(run.issueId);
   }

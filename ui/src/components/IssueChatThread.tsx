@@ -71,6 +71,7 @@ import type {
   SuggestTasksInteraction,
 } from "../lib/issue-thread-interactions";
 import { buildIssueThreadInteractionSummary, isIssueThreadInteraction } from "../lib/issue-thread-interactions";
+import { isLiveIssueRun } from "../lib/liveIssueIds";
 import { resolveIssueChatTranscriptRuns } from "../lib/issueChatTranscriptRuns";
 import {
   formatTimelineWorkspaceLabel,
@@ -4426,9 +4427,10 @@ export function IssueChatThread({
   const displayLiveRuns = useMemo(() => {
     const deduped = new Map<string, LiveRunForIssue>();
     for (const run of liveRuns) {
+      if (!isLiveIssueRun(run, issueStatus)) continue;
       deduped.set(run.id, run);
     }
-    if (activeRun) {
+    if (activeRun && isLiveIssueRun(activeRun, issueStatus)) {
       deduped.set(activeRun.id, {
         id: activeRun.id,
         status: activeRun.status,
@@ -4459,7 +4461,7 @@ export function IssueChatThread({
       });
     }
     return [...deduped.values()].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-  }, [activeRun, liveRuns]);
+  }, [activeRun, issueStatus, liveRuns]);
   const transcriptRuns = useMemo(() => {
     return resolveIssueChatTranscriptRuns({
       linkedRuns,
@@ -4524,6 +4526,7 @@ export function IssueChatThread({
         agentMap,
         currentUserId,
         userLabelMap,
+        issueStatus,
       }),
     [
       comments,
@@ -4540,6 +4543,7 @@ export function IssueChatThread({
       agentMap,
       currentUserId,
       userLabelMap,
+      issueStatus,
     ],
   );
   const stableMessagesRef = useRef<readonly ThreadMessage[]>([]);

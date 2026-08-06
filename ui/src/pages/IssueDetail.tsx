@@ -1978,7 +1978,10 @@ export function IssueDetail() {
     },
     [issue?.id, rawChildIssues],
   );
-  const liveIssueIds = useMemo(() => collectLiveIssueIds(companyLiveRuns), [companyLiveRuns]);
+  const liveIssueIds = useMemo(
+    () => collectLiveIssueIds(companyLiveRuns, issue ? [issue, ...childIssues] : childIssues),
+    [childIssues, companyLiveRuns, issue],
+  );
   const issuePanelKey = useMemo(
     () => buildIssuePropertiesPanelKey(issue ?? null, childIssues),
     [childIssues, issue],

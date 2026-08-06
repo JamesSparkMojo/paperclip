@@ -29,6 +29,7 @@ import { useSidebar } from "@/context/SidebarContext";
 import { cn } from "@/lib/utils";
 import { useIssuePlanDocument } from "@/hooks/useIssuePlanDocument";
 import { latestSameRunHandoffTimestamp, type IssueChatComment } from "@/lib/issue-chat-messages";
+import { isLiveIssueRun, isTerminalIssueStatus } from "@/lib/liveIssueIds";
 import { workModeInEffectAt } from "@/lib/issue-timeline-events";
 import { workModeMetaFor } from "@/lib/work-mode-meta";
 
@@ -177,9 +178,10 @@ export function TaskChatThread(props: TaskChatThreadProps) {
 
   // The single in-flight run whose turn we stream live (non-terminal).
   const liveRun = useMemo(() => {
-    if (activeRun && !isTerminalRunStatus(activeRun.status)) return activeRun;
-    return (liveRuns ?? []).find((r) => !isTerminalRunStatus(r.status)) ?? null;
-  }, [activeRun, liveRuns]);
+    if (isTerminalIssueStatus(issueStatus)) return null;
+    if (activeRun && isLiveIssueRun(activeRun, issueStatus)) return activeRun;
+    return (liveRuns ?? []).find((r) => isLiveIssueRun(r, issueStatus)) ?? null;
+  }, [activeRun, issueStatus, liveRuns]);
 
   // Runs observed non-terminal while mounted: their turns ANIMATE the fold when
   // they settle. Runs already terminal at mount collapse instantly.

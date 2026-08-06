@@ -1,13 +1,36 @@
+import type { IssueStatus } from "@paperclipai/shared";
 import type { LiveRunForIssue } from "../api/heartbeats";
 
 function isLiveRunStatus(status: string): boolean {
   return status === "queued" || status === "running";
 }
 
-export function collectLiveIssueIds(liveRuns: readonly LiveRunForIssue[] | null | undefined): Set<string> {
+const TERMINAL_ISSUE_STATUSES = new Set<IssueStatus>(["done", "cancelled"]);
+
+export function isTerminalIssueStatus(status: string | null | undefined): status is IssueStatus {
+  return TERMINAL_ISSUE_STATUSES.has(status as IssueStatus);
+}
+
+export function isLiveIssueRun(
+  run: Pick<LiveRunForIssue, "status">,
+  issueStatus?: string | null,
+): boolean {
+  return isLiveRunStatus(run.status) && !isTerminalIssueStatus(issueStatus);
+}
+
+export interface LiveIssueStatusNode {
+  id: string;
+  status: IssueStatus | string;
+}
+
+export function collectLiveIssueIds(
+  liveRuns: readonly LiveRunForIssue[] | null | undefined,
+  issues?: readonly LiveIssueStatusNode[] | null,
+): Set<string> {
   const ids = new Set<string>();
+  const statusByIssueId = new Map((issues ?? []).map((issue) => [issue.id, issue.status]));
   for (const run of liveRuns ?? []) {
-    if (run.issueId && isLiveRunStatus(run.status)) ids.add(run.issueId);
+    if (run.issueId && isLiveIssueRun(run, statusByIssueId.get(run.issueId))) ids.add(run.issueId);
   }
   return ids;
 }

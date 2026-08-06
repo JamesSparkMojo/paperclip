@@ -74,6 +74,42 @@ describe("collectLiveIssueIds", () => {
 
     expect([...collectLiveIssueIds(liveRuns)]).toEqual(["issue-1", "issue-2"]);
   });
+
+  it("suppresses live ids for terminal issues while keeping non-terminal issues live", () => {
+    const liveRuns: LiveRunForIssue[] = [
+      {
+        id: "run-terminal",
+        status: "running",
+        invocationSource: "scheduler",
+        triggerDetail: null,
+        startedAt: "2026-04-20T10:00:00.000Z",
+        finishedAt: null,
+        createdAt: "2026-04-20T10:00:00.000Z",
+        agentId: "agent-1",
+        agentName: "Coder",
+        adapterType: "codex_local",
+        issueId: "issue-done",
+      },
+      {
+        id: "run-live",
+        status: "queued",
+        invocationSource: "scheduler",
+        triggerDetail: null,
+        startedAt: null,
+        finishedAt: null,
+        createdAt: "2026-04-20T10:01:00.000Z",
+        agentId: "agent-2",
+        agentName: "Builder",
+        adapterType: "codex_local",
+        issueId: "issue-open",
+      },
+    ];
+
+    expect([...collectLiveIssueIds(liveRuns, [
+      { id: "issue-done", status: "done" },
+      { id: "issue-open", status: "in_progress" },
+    ])]).toEqual(["issue-open"]);
+  });
 });
 
 describe("collectSubtreeLiveCounts", () => {

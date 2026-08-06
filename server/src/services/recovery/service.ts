@@ -5477,16 +5477,94 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return Math.max(1, Math.floor(asNumber(raw, fallback)));
   }
 
+  // Backstop reconciler: terminalizes a "running" run after its process and its
+  // sandbox are both gone. A hard server crash can skip the graceful teardown,
+  // so the run finalizer never writes the terminal status and
+  // heartbeat_runs.status stays "running" forever. The UI reads liveness from
+  // that row, so the task shows "Live" forever. This function forces the run to
+  // "interrupted" and records a run event, so the state is auditable. It never
+  // overwrites a status that another path already made terminal, and it never
+  // terminalizes a run whose process is still alive.
+  async function terminalizeOrphanedRunningRun(
+    run: typeof heartbeatRuns.$inferSelect,
+  ): Promise<{ terminalized: boolean; status: string }> {
+    // Act only on a run in "running" status. A "queued" run has no process yet,
+    // and a "scheduled_retry" run has no process on purpose because it waits to
+    // retry. Neither is orphaned, so this function must not terminalize them.
+    if (run.status !== "running") return { terminalized: false, status: run.status };
+
+    // The run is live only when a process still backs it. Check the in-memory
+    // handle first, then the recorded pid and process group. Require recorded
+    // process metadata, so this never terminalizes a run that has not yet
+    // stored its pid.
+    const handle = runningProcesses.get(run.id);
+    if (handle) return { terminalized: false, status: run.status };
+    const pid = run.processPid ?? null;
+    const processGroupId = run.processGroupId ?? null;
+    if (typeof pid !== "number" && typeof processGroupId !== "number") {
+      return { terminalized: false, status: run.status };
+    }
+    const processAlive =
+      (typeof pid === "number" && isPidAlive(pid)) ||
+      (typeof processGroupId === "number" && isProcessGroupAlive(processGroupId));
+    if (processAlive) return { terminalized: false, status: run.status };
+
+    const now = new Date();
+    const message =
+      "run terminalized by recovery backstop: process and sandbox gone while heartbeat_runs.status stayed live";
+    const updated = await db
+      .update(heartbeatRuns)
+      .set({
+        status: "interrupted",
+        finishedAt: now,
+        error: run.error ?? message,
+        errorCode: run.errorCode ?? "orphaned_running_run",
+        updatedAt: now,
+      })
+      .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (!updated) {
+      // Another path finalized the run between the read and this write. Keep
+      // that terminal outcome authoritative.
+      const [current] = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, run.id));
+      return { terminalized: false, status: current?.status ?? run.status };
+    }
+
+    runningProcesses.delete(run.id);
+    await appendRecoveryRunEvent(updated, {
+      level: "warn",
+      message,
+      payload: {
+        source: "recovery.sweep_stale_issue_locks",
+        previousStatus: run.status,
+        pid,
+        processGroupId,
+      },
+    });
+    logger.warn(
+      { runId: run.id, previousStatus: run.status, pid, processGroupId },
+      "terminalized orphaned running heartbeat run in stale-lock sweep",
+    );
+    return { terminalized: true, status: updated.status };
+  }
+
   // Backstop sweeper: clears stale lock columns on issues whose checkoutRunId
   // or executionRunId points at a heartbeat_runs row that is either missing or
   // in a terminal status. Provides self-heal for stale locks that fell outside
   // releaseIssueExecutionAndPromote / clearCheckoutRunIfTerminal / adoption.
-  // Idempotent and safe: clears at most one row's worth of lock columns per
-  // candidate, and only when the referenced run row is unambiguously terminal.
+  // Before it evaluates cleanability, it terminalizes any referenced run that
+  // still claims to be live but whose process and sandbox are both gone, so a
+  // stuck "running" run can no longer block the sweep. Idempotent and safe:
+  // clears at most one row's worth of lock columns per candidate.
   async function sweepStaleIssueLocks() {
     const result = {
       cleared: 0,
       issueIds: [] as string[],
+      terminalizedRunIds: [] as string[],
     };
 
     const candidates = await db
@@ -5511,12 +5589,22 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const runRows =
       referencedRunIds.length > 0
         ? await db
-            .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+            .select()
             .from(heartbeatRuns)
             .where(inArray(heartbeatRuns.id, referencedRunIds))
         : [];
     const runStatusById = new Map<string, string>();
     for (const row of runRows) runStatusById.set(row.id, row.status);
+
+    // Pre-pass: terminalize any referenced run that still claims to be live but
+    // whose process and sandbox are both gone. This lets the sweep clear the
+    // lock in the same pass instead of waiting for the run to reach a terminal
+    // status by another route.
+    for (const row of runRows) {
+      const outcome = await terminalizeOrphanedRunningRun(row);
+      runStatusById.set(row.id, outcome.status);
+      if (outcome.terminalized) result.terminalizedRunIds.push(row.id);
+    }
 
     const isCleanable = (runId: string | null) => {
       if (!runId) return true;
@@ -5576,9 +5664,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       });
     }
 
-    if (result.cleared > 0) {
+    if (result.cleared > 0 || result.terminalizedRunIds.length > 0) {
       logger.warn(
-        { cleared: result.cleared, issueIds: result.issueIds },
+        {
+          cleared: result.cleared,
+          issueIds: result.issueIds,
+          terminalizedRunIds: result.terminalizedRunIds,
+        },
         "swept stale issue lock columns",
       );
     }

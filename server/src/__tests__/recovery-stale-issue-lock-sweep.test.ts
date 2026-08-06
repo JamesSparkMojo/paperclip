@@ -6,6 +6,7 @@ import {
   agents,
   companies,
   createDb,
+  heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
   issueRelations,
@@ -46,6 +47,7 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
     await db.delete(issueRelations);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);
@@ -222,5 +224,88 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
     const second = await heartbeat.sweepStaleIssueLocks();
     expect(first.cleared).toBe(1);
     expect(second.cleared).toBe(0);
+  });
+
+  it("terminalizes an orphaned running run whose process is gone, then clears the lock", async () => {
+    const { companyId, agentId, runningRunId } = await seed();
+    // The run recorded a pid, but the process and its sandbox are gone. A pid
+    // this large never maps to a live process, so isPidAlive returns false.
+    await db
+      .update(heartbeatRuns)
+      .set({ processPid: 2_000_000_000 })
+      .where(eq(heartbeatRuns.id, runningRunId));
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Orphaned running run — terminalize then clear",
+      status: "done",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: runningRunId,
+      executionRunId: runningRunId,
+      executionLockedAt: new Date(),
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.sweepStaleIssueLocks();
+
+    expect(result.terminalizedRunIds).toEqual([runningRunId]);
+    expect(result.cleared).toBe(1);
+
+    const runStatus = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runningRunId))
+      .then((rows) => rows[0]?.status);
+    expect(runStatus).toBe("interrupted");
+
+    const lock = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(lock).toEqual({ checkoutRunId: null, executionRunId: null });
+
+    const event = await db
+      .select({ message: heartbeatRunEvents.message })
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, runningRunId))
+      .then((rows) => rows[0]);
+    expect(event?.message).toContain("recovery backstop");
+  });
+
+  it("does not terminalize a running run whose process is still alive", async () => {
+    const { companyId, agentId, runningRunId } = await seed();
+    // process.pid is the live test process, so isPidAlive returns true.
+    await db
+      .update(heartbeatRuns)
+      .set({ processPid: process.pid })
+      .where(eq(heartbeatRuns.id, runningRunId));
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Live run — preserve",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: runningRunId,
+      executionRunId: runningRunId,
+      executionLockedAt: new Date(),
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.sweepStaleIssueLocks();
+
+    expect(result.terminalizedRunIds).toEqual([]);
+    expect(result.cleared).toBe(0);
+
+    const runStatus = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runningRunId))
+      .then((rows) => rows[0]?.status);
+    expect(runStatus).toBe("running");
   });
 });

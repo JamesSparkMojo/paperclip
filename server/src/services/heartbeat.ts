@@ -8855,6 +8855,72 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return { run: current, updated: false as const };
   }
 
+  // Invariant: when a run releases its environment lease, the run row must be
+  // terminal. The finalizer writes the terminal status in a step that is
+  // separate from the agent status=done PATCH. If the sandbox or the run
+  // process stops between the two steps, heartbeat_runs.status stays "running".
+  // The UI reads liveness from that row, so a finished task shows "Live"
+  // forever. This function closes the gap in the run teardown: when the run is
+  // still running or queued, it forces a terminal status before the lease is
+  // released. It never overwrites a status that another path already made
+  // terminal.
+  async function terminalizeRunOnLeaseRelease(
+    run: typeof heartbeatRuns.$inferSelect,
+  ): Promise<typeof heartbeatRuns.$inferSelect> {
+    if (isHeartbeatRunTerminalStatus(run.status)) return run;
+    if (run.status !== "running" && run.status !== "queued") return run;
+
+    // Choose the terminal status that reflects the true outcome. When the issue
+    // already reached a terminal status, the run reached its goal, so use the
+    // matching terminal run status. Otherwise the teardown cut the run short,
+    // so use "interrupted".
+    const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+    let terminalStatus: "succeeded" | "cancelled" | "interrupted" = "interrupted";
+    if (issueId) {
+      const issueStatus = await db
+        .select({ status: issues.status })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0]?.status ?? null);
+      if (issueStatus === "done") terminalStatus = "succeeded";
+      else if (issueStatus === "cancelled") terminalStatus = "cancelled";
+    }
+
+    const message =
+      `run terminalized on environment lease release: heartbeat_runs.status was still ${run.status} at teardown`;
+    const write = await setRunStatusIfRunning(run.id, terminalStatus, {
+      finishedAt: run.finishedAt ?? new Date(),
+      error: run.error ?? (terminalStatus === "interrupted" ? message : null),
+      errorCode: run.errorCode ?? (terminalStatus === "interrupted" ? "lease_released_before_terminal" : null),
+    });
+    if (!write.updated) {
+      // Another path already finalized the run. Keep that terminal outcome.
+      return write.run ?? run;
+    }
+
+    const terminalRun = write.run;
+    if (terminalRun) {
+      await appendRunEvent(terminalRun, await nextRunEventSeq(terminalRun.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: terminalStatus === "interrupted" ? "warn" : "info",
+        message,
+        payload: {
+          previousStatus: run.status,
+          terminalStatus,
+          reason: "environment_lease_release",
+          ...(issueId ? { issueId } : {}),
+        },
+      }).catch((eventErr) => {
+        logger.warn(
+          { err: eventErr, runId: run.id },
+          "failed to append run event for lease-release terminalization",
+        );
+      });
+    }
+    return terminalRun ?? run;
+  }
+
   function publishRunLifecyclePluginEvent(run: typeof heartbeatRuns.$inferSelect) {
     const eventType =
       run.status === "running"
@@ -16193,7 +16259,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
           }
         } finally {
-          const latestRun = await getRun(run.id).catch(() => null);
+          let latestRun = await getRun(run.id).catch(() => null);
+          // Close the invariant "environment lease released implies the run is
+          // terminal". When the teardown reaches this point with the run still
+          // running or queued, force a terminal status before the lease is
+          // released, so the UI never shows a finished task as "Live".
+          if (latestRun) {
+            latestRun = await terminalizeRunOnLeaseRelease(latestRun).catch((terminalizeErr) => {
+              logger.error(
+                { err: terminalizeErr, runId: run.id },
+                "failed to terminalize run before environment lease release",
+              );
+              return latestRun;
+            });
+          }
           await releaseEnvironmentLeasesForRun({
             runId: run.id,
             companyId: run.companyId,
@@ -18934,6 +19013,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     },
 
     reconcileStrandedAssignedIssues,
+
+    terminalizeRunOnLeaseRelease,
 
     sweepStaleIssueLocks,
 

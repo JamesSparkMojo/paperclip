@@ -180,6 +180,92 @@ describe("AttentionQueueRow", () => {
     expect(el.textContent).toContain("Send back to work");
   });
 
+  // PAP-16506 P4: the card states who holds the verdict before offering the
+  // verbs, so nobody presses Approve on a review the server will 403.
+  it("states the default approver rule on a review with no policy set", () => {
+    const el = render(
+      <AttentionQueueRow
+        item={buildItem({
+          sourceKind: "review" as AttentionSourceKind,
+          inlineResolvable: true,
+          subject: {
+            kind: "issue",
+            id: "issue-1",
+            companyId: "c1",
+            title: "PR ready for review",
+            identifier: null,
+            status: "in_review",
+            href: "/PAP/issues/PAP-1",
+            metadata: { reviewAttentionState: "stalled" },
+          },
+        })}
+        companyId="c1"
+        expanded
+        onToggleExpand={noop}
+        onDismiss={noop}
+      />,
+    );
+    const copy = el.querySelector('[data-testid="review-policy-copy"]');
+    expect(copy?.getAttribute("data-review-policy")).toBe("anyone");
+    expect(copy?.textContent).toContain("Anyone with write access can approve");
+  });
+
+  it("states the opt-in constraint when the issue carries one", () => {
+    const el = render(
+      <AttentionQueueRow
+        item={buildItem({
+          sourceKind: "review" as AttentionSourceKind,
+          inlineResolvable: true,
+          subject: {
+            kind: "issue",
+            id: "issue-1",
+            companyId: "c1",
+            title: "PR ready for review",
+            identifier: null,
+            status: "in_review",
+            href: "/PAP/issues/PAP-1",
+            metadata: { reviewAttentionState: "stalled", reviewPolicy: "human_only" },
+          },
+        })}
+        companyId="c1"
+        expanded
+        onToggleExpand={noop}
+        onDismiss={noop}
+      />,
+    );
+    const copy = el.querySelector('[data-testid="review-policy-copy"]');
+    expect(copy?.getAttribute("data-review-policy")).toBe("human_only");
+    expect(copy?.textContent).toContain("Requires a human");
+  });
+
+  it("ignores a review policy the client does not recognise", () => {
+    const el = render(
+      <AttentionQueueRow
+        item={buildItem({
+          sourceKind: "review" as AttentionSourceKind,
+          inlineResolvable: true,
+          subject: {
+            kind: "issue",
+            id: "issue-1",
+            companyId: "c1",
+            title: "PR ready for review",
+            identifier: null,
+            status: "in_review",
+            href: "/PAP/issues/PAP-1",
+            metadata: { reviewAttentionState: "stalled", reviewPolicy: "board_only" },
+          },
+        })}
+        companyId="c1"
+        expanded
+        onToggleExpand={noop}
+        onDismiss={noop}
+      />,
+    );
+    expect(
+      el.querySelector('[data-testid="review-policy-copy"]')?.getAttribute("data-review-policy"),
+    ).toBe("anyone");
+  });
+
   it("deep-links a covered review instead of inlining", () => {
     const el = render(
       <AttentionQueueRow

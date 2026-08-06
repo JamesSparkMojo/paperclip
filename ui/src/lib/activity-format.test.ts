@@ -66,6 +66,43 @@ describe("activity formatting", () => {
     expect(formatIssueActivityAction("issue.monitor_recovery_issue_created")).toBe("created a monitor recovery issue");
   });
 
+  // PAP-16506 P4: agents can now approve or reject a review, so a verdict has to
+  // read as a verdict in the timeline instead of leaking the raw action id.
+  it("reads review verdicts as verdicts, whoever gave them", () => {
+    expect(formatIssueActivityAction("issue.thread_interaction_accepted")).toBe("approved the request");
+    expect(formatIssueActivityAction("issue.thread_interaction_rejected")).toBe("rejected the request");
+    expect(formatIssueActivityAction("issue.thread_interaction_withdrawn")).toBe("withdrew the request");
+    expect(formatIssueActivityAction("issue.thread_interaction_expired")).toBe("let the request expire");
+    expect(formatActivityVerb("issue.thread_interaction_accepted")).toBe("approved the request on");
+    expect(formatActivityVerb("issue.thread_interaction_rejected")).toBe("rejected the request on");
+  });
+
+  it("names the verb an actor chose on a stalled review", () => {
+    expect(formatIssueActivityAction("issue.stalled_review_decided", { action: "approve" }))
+      .toBe("approved the review");
+    expect(formatIssueActivityAction("issue.stalled_review_decided", { action: "request_changes" }))
+      .toBe("requested changes on the review");
+    expect(formatIssueActivityAction("issue.stalled_review_decided", { action: "send_back" }))
+      .toBe("sent the review back to work");
+    expect(formatActivityVerb("issue.stalled_review_decided", { action: "approve" }))
+      .toBe("approved the review on");
+  });
+
+  it("falls back to a generic verdict line when the decision verb is missing", () => {
+    expect(formatIssueActivityAction("issue.stalled_review_decided")).toBe("recorded a review verdict");
+    expect(formatIssueActivityAction("issue.stalled_review_decided", { action: "shrug" }))
+      .toBe("recorded a review verdict");
+  });
+
+  it("describes a review-policy change without calling the default 'none'", () => {
+    expect(formatIssueActivityAction("issue.updated", { reviewPolicy: null }))
+      .toBe("changed who can approve to anyone");
+    expect(formatIssueActivityAction("issue.updated", { reviewPolicy: "human_only" }))
+      .toBe("changed who can approve to people only");
+    expect(formatIssueActivityAction("issue.updated", { reviewPolicy: "not_creator" }))
+      .toBe("changed who can approve to not the requester");
+  });
+
   it("uses plain next-step copy for successful-run handoff activity", () => {
     expect(formatActivityVerb("issue.successful_run_handoff_required")).toBe("flagged missing next step on");
     expect(formatIssueActivityAction("issue.successful_run_handoff_required")).toBe("Run finished without a clear next step");

@@ -89,6 +89,11 @@ import {
 } from "./helpers";
 import { PropertyPicker } from "./property-picker";
 import { PropertyChip, PropertyRow, PropertySection } from "./primitives";
+import {
+  ISSUE_REVIEW_POLICY_OPTIONS,
+  issueReviewPolicyCopy,
+  resolveIssueReviewPolicy,
+} from "../../lib/review-policy";
 import { IssueCasesPanel } from "../IssueCasesPanel";
 import { ExpandRelationListButton, RemovableIssueReferencePill } from "./relation-controls";
 import { Badge } from "@/components/ui/badge";
@@ -229,6 +234,7 @@ export function IssueProperties({
   const [relatedTasksExpanded, setRelatedTasksExpanded] = useState(false);
   const [parentOpen, setParentOpen] = useState(false);
   const [parentSearch, setParentSearch] = useState("");
+  const [reviewPolicyOpen, setReviewPolicyOpen] = useState(false);
   const [reviewersOpen, setReviewersOpen] = useState(false);
   const [reviewerSearch, setReviewerSearch] = useState("");
   const [approversOpen, setApproversOpen] = useState(false);
@@ -801,6 +807,54 @@ export function IssueProperties({
   const approverTrigger = approverValues.length > 0
     ? <span className="text-sm truncate min-w-0" title={approverLabel}>{approverLabel}</span>
     : <span className="text-sm text-muted-foreground">None</span>;
+  // PAP-16506 P4: who may give the `in_review` verdict. `null` ≡ "anyone", the
+  // default for every issue — the trigger shows that baseline rather than "None"
+  // so the row never reads as "nobody can approve this".
+  const reviewPolicy = resolveIssueReviewPolicy(issue.reviewPolicy);
+  const reviewPolicyDetails = issueReviewPolicyCopy(reviewPolicy);
+  const reviewPolicyTrigger = (
+    <>
+      <reviewPolicyDetails.Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+      <span
+        className={cn("text-sm truncate min-w-0", reviewPolicy === "anyone" && "text-muted-foreground")}
+        // The label truncates in a narrow panel, so the tooltip has to carry it
+        // as well as the rule — otherwise "Anyone can appro…" is unrecoverable.
+        title={`${reviewPolicyDetails.label} — ${reviewPolicyDetails.description}`}
+      >
+        {reviewPolicyDetails.label}
+      </span>
+    </>
+  );
+  const reviewPolicyContent = (
+    <div className="max-h-64 overflow-y-auto overscroll-contain">
+      {ISSUE_REVIEW_POLICY_OPTIONS.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          className={cn(
+            "flex w-full min-w-0 items-start gap-2 rounded px-2 py-1.5 text-left hover:bg-accent/50",
+            option.value === reviewPolicy && "bg-accent",
+          )}
+          data-testid={`review-policy-option-${option.value}`}
+          onClick={() => {
+            // Persist the default as NULL so an untouched issue keeps the
+            // board-wide default rather than pinning today's meaning of "anyone".
+            onUpdate({ reviewPolicy: option.value === "anyone" ? null : option.value });
+            setReviewPolicyOpen(false);
+          }}
+        >
+          <option.Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="min-w-0 flex-1">
+            <span className="block text-xs font-medium text-foreground">{option.label}</span>
+            <span className="block text-xs text-muted-foreground">{option.description}</span>
+          </span>
+          {option.value === reviewPolicy ? (
+            <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          ) : null}
+        </button>
+      ))}
+    </div>
+  );
   const nextRunnableExecutionStage = (() => {
     if (issue.executionState?.status === "changes_requested" && issue.executionState.currentStageType) {
       return issue.executionState.currentStageType;
@@ -2232,6 +2286,18 @@ export function IssueProperties({
       </PropertySection>
 
       <PropertySection title="Execution">
+        <PropertyPicker
+          inline={inline}
+          label="Review policy"
+          open={reviewPolicyOpen}
+          onOpenChange={setReviewPolicyOpen}
+          triggerContent={reviewPolicyTrigger}
+          triggerClassName="min-w-0 max-w-full"
+          popoverClassName={cn("max-w-full", inline ? "w-full" : "w-72")}
+        >
+          {reviewPolicyContent}
+        </PropertyPicker>
+
         <PropertyPicker
           inline={inline}
           label="Reviewers"

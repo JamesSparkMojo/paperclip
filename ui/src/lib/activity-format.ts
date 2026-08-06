@@ -1,5 +1,6 @@
 import type { Agent } from "@paperclipai/shared";
 import type { CompanyUserProfile } from "./company-members";
+import { formatReviewPolicyValue } from "./review-policy";
 
 type ActivityDetails = Record<string, unknown> | null | undefined;
 
@@ -69,6 +70,18 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "approval.created": "requested approval",
   "approval.approved": "approved",
   "approval.rejected": "rejected",
+  // Review verdicts (PAP-16506). An agent may now approve or reject a review —
+  // including its own work — so these must read as verdicts in the feed instead
+  // of falling through to the raw "issue thread interaction accepted" action id.
+  "issue.thread_interaction_created": "asked for a decision on",
+  "issue.thread_interaction_accepted": "approved the request on",
+  "issue.thread_interaction_rejected": "rejected the request on",
+  "issue.thread_interaction_answered": "answered the request on",
+  "issue.thread_interaction_withdrawn": "withdrew the request on",
+  "issue.thread_interaction_cancelled": "cancelled the request on",
+  "issue.thread_interaction_expired": "let the request expire on",
+  "issue.thread_interaction_item_verdicts_submitted": "submitted verdicts on",
+  "issue.stalled_review_decided": "recorded a review verdict on",
   "project.created": "created",
   "project.updated": "updated",
   "project.deleted": "deleted",
@@ -133,6 +146,26 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "approval.created": "requested approval",
   "approval.approved": "approved",
   "approval.rejected": "rejected",
+  "issue.thread_interaction_created": "asked for a decision",
+  "issue.thread_interaction_accepted": "approved the request",
+  "issue.thread_interaction_rejected": "rejected the request",
+  "issue.thread_interaction_answered": "answered the request",
+  "issue.thread_interaction_withdrawn": "withdrew the request",
+  "issue.thread_interaction_cancelled": "cancelled the request",
+  "issue.thread_interaction_expired": "let the request expire",
+  "issue.thread_interaction_item_verdicts_submitted": "submitted verdicts on the request",
+  "issue.stalled_review_decided": "recorded a review verdict",
+};
+
+/**
+ * `issue.stalled_review_decided` carries the verb the actor chose, so the line
+ * names the verdict ("approved the review") rather than the generic action.
+ * Mirrors `StalledReviewDecisionAction` in shared.
+ */
+const STALLED_REVIEW_DECISION_LABELS: Record<string, string> = {
+  approve: "approved the review",
+  request_changes: "requested changes on the review",
+  send_back: "sent the review back to work",
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -284,6 +317,11 @@ function formatIssueUpdatedAction(details: ActivityDetails, options: ActivityFor
     const assigneeName = formatAssigneeName(details, options);
     parts.push(assigneeName ? `made ${assigneeName} responsible for the task` : "cleared the responsible");
   }
+  if (details.reviewPolicy !== undefined) {
+    // `null` is the default ("anyone can approve"), so it must not read as
+    // "changed the review policy to none" (PAP-16506).
+    parts.push(`changed who can approve to ${formatReviewPolicyValue(details.reviewPolicy)}`);
+  }
   if (details.title !== undefined) parts.push("updated the title");
   if (details.description !== undefined) parts.push("updated the description");
 
@@ -342,6 +380,12 @@ export function formatActivityVerb(
     if (issueUpdatedVerb) return issueUpdatedVerb;
   }
 
+  if (action === "issue.stalled_review_decided") {
+    const decision = typeof details?.action === "string" ? details.action : null;
+    const label = decision ? STALLED_REVIEW_DECISION_LABELS[decision] : null;
+    if (label) return `${label} on`;
+  }
+
   const structuredChange = formatStructuredIssueChange({
     action,
     details,
@@ -374,6 +418,12 @@ export function formatIssueActivityAction(
   if (action === "issue.accepted_plan_decomposition_updated") {
     const detail = formatAcceptedPlanDecompositionDetail(details);
     if (detail) return detail;
+  }
+
+  if (action === "issue.stalled_review_decided") {
+    const decision = typeof details?.action === "string" ? details.action : null;
+    const label = decision ? STALLED_REVIEW_DECISION_LABELS[decision] : null;
+    if (label) return label;
   }
 
   if (action.startsWith("issue.monitor_") && details) {

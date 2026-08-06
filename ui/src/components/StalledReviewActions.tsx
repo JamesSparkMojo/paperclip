@@ -1,10 +1,11 @@
 import { useState, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Loader2, RotateCcw, Undo2 } from "lucide-react";
-import type { StalledReviewDecisionAction } from "@paperclipai/shared";
+import type { IssueReviewPolicy, StalledReviewDecisionAction } from "@paperclipai/shared";
 import { issuesApi } from "../api/issues";
 import { useToastActions } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
+import { issueReviewPolicyCopy } from "../lib/review-policy";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
@@ -16,6 +17,12 @@ interface StalledReviewActionsProps {
   footerSlot?: ReactNode;
   /** Fired after a decision lands so the surface can navigate / close / refetch extras. */
   onResolved?: (action: StalledReviewDecisionAction) => void;
+  /**
+   * The issue's `reviewPolicy` (PAP-16506). `null`/undefined ≡ "anyone", the
+   * default — the card then states that anyone with write access can approve
+   * rather than staying silent about who holds the verdict.
+   */
+  reviewPolicy?: IssueReviewPolicy | null;
   className?: string;
 }
 
@@ -40,6 +47,7 @@ export function StalledReviewActions({
   companyId,
   footerSlot,
   onResolved,
+  reviewPolicy,
   className,
 }: StalledReviewActionsProps) {
   const queryClient = useQueryClient();
@@ -73,9 +81,20 @@ export function StalledReviewActions({
   const noteEmpty = note.trim().length === 0;
   const runningFor = (action: StalledReviewDecisionAction) =>
     pending && decide.variables === action;
+  const policy = issueReviewPolicyCopy(reviewPolicy);
 
   return (
     <div className={cn("flex flex-col gap-3", className)}>
+      {/* Who holds the verdict, before the verbs — the server enforces the same
+          rule, so the card must not imply an approval the PATCH would 403. */}
+      <p
+        className="flex min-w-0 items-start gap-1.5 text-xs text-muted-foreground"
+        data-testid="review-policy-copy"
+        data-review-policy={policy.value}
+      >
+        <policy.Icon className="mt-0.5 size-3 shrink-0" aria-hidden />
+        <span className="min-w-0">{policy.approverCopy}</span>
+      </p>
       <Textarea
         value={note}
         onChange={(event) => setNote(event.target.value)}

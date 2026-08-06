@@ -2692,4 +2692,85 @@ describe("IssueProperties", () => {
 
     act(() => root.unmount());
   });
+  // PAP-16506 P4: `in_review` means someone must give a verdict, and by default
+  // that is anyone with write access — including the agent that did the work.
+  // The row has to say so on a NULL column instead of reading "None".
+  it("shows the default review policy on an issue that has never set one", async () => {
+    const root = renderProperties(container, {
+      issue: createIssue({ reviewPolicy: null }),
+      childIssues: [],
+      onUpdate: vi.fn(),
+      inline: true,
+    });
+    await flush();
+
+    const trigger = findRowTrigger(container, "Review policy");
+    expect(trigger).toBeTruthy();
+    expect(trigger?.textContent).toContain("Anyone can approve");
+    expect(trigger?.textContent).not.toContain("None");
+
+    act(() => root.unmount());
+  });
+
+  it("shows the opt-in constraint when the issue sets one", async () => {
+    const root = renderProperties(container, {
+      issue: createIssue({ reviewPolicy: "human_only" }),
+      childIssues: [],
+      onUpdate: vi.fn(),
+      inline: true,
+    });
+    await flush();
+
+    expect(findRowTrigger(container, "Review policy")?.textContent).toContain("People only");
+
+    act(() => root.unmount());
+  });
+
+  it("PATCHes the chosen review policy and clears back to NULL for the default", async () => {
+    const onUpdate = vi.fn();
+    const root = renderProperties(container, {
+      issue: createIssue({ reviewPolicy: null }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    await act(async () => {
+      findRowTrigger(container, "Review policy")!.click();
+    });
+    await flush();
+
+    const option = container.querySelector<HTMLButtonElement>('[data-testid="review-policy-option-not_creator"]');
+    expect(option).toBeTruthy();
+    await act(async () => {
+      option!.click();
+    });
+    expect(onUpdate).toHaveBeenCalledWith({ reviewPolicy: "not_creator" });
+
+    act(() => root.unmount());
+  });
+
+  it("writes NULL rather than the literal default so the issue tracks the board default", async () => {
+    const onUpdate = vi.fn();
+    const root = renderProperties(container, {
+      issue: createIssue({ reviewPolicy: "human_only" }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    await act(async () => {
+      findRowTrigger(container, "Review policy")!.click();
+    });
+    await flush();
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="review-policy-option-anyone"]')!.click();
+    });
+    expect(onUpdate).toHaveBeenCalledWith({ reviewPolicy: null });
+
+    act(() => root.unmount());
+  });
 });

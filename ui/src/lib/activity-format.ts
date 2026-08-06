@@ -70,16 +70,17 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "approval.created": "requested approval",
   "approval.approved": "approved",
   "approval.rejected": "rejected",
-  // Review verdicts (PAP-16506). An agent may now approve or reject a review —
-  // including its own work — so these must read as verdicts in the feed instead
+  // Interaction outcomes (PAP-16506). An agent may now resolve one — including a
+  // review of its own work — so these must read as outcomes in the feed instead
   // of falling through to the raw "issue thread interaction accepted" action id.
+  // `details.interactionKind` sharpens the wording; see INTERACTION_OUTCOME_LABELS.
   "issue.thread_interaction_created": "asked for a decision on",
-  "issue.thread_interaction_accepted": "approved the request on",
+  "issue.thread_interaction_accepted": "accepted the request on",
   "issue.thread_interaction_rejected": "rejected the request on",
   "issue.thread_interaction_answered": "answered the request on",
   "issue.thread_interaction_withdrawn": "withdrew the request on",
   "issue.thread_interaction_cancelled": "cancelled the request on",
-  "issue.thread_interaction_expired": "let the request expire on",
+  "issue.thread_interaction_expired": "expired the request on",
   "issue.thread_interaction_item_verdicts_submitted": "submitted verdicts on",
   "issue.stalled_review_decided": "recorded a review verdict on",
   "project.created": "created",
@@ -147,12 +148,12 @@ const ISSUE_ACTIVITY_LABELS: Record<string, string> = {
   "approval.approved": "approved",
   "approval.rejected": "rejected",
   "issue.thread_interaction_created": "asked for a decision",
-  "issue.thread_interaction_accepted": "approved the request",
+  "issue.thread_interaction_accepted": "accepted the request",
   "issue.thread_interaction_rejected": "rejected the request",
   "issue.thread_interaction_answered": "answered the request",
   "issue.thread_interaction_withdrawn": "withdrew the request",
   "issue.thread_interaction_cancelled": "cancelled the request",
-  "issue.thread_interaction_expired": "let the request expire",
+  "issue.thread_interaction_expired": "expired the request",
   "issue.thread_interaction_item_verdicts_submitted": "submitted verdicts on the request",
   "issue.stalled_review_decided": "recorded a review verdict",
 };
@@ -167,6 +168,42 @@ const STALLED_REVIEW_DECISION_LABELS: Record<string, string> = {
   request_changes: "requested changes on the review",
   send_back: "sent the review back to work",
 };
+
+/**
+ * `issue.thread_interaction_accepted` / `_rejected` fire for *every* interaction
+ * kind, not only for a review. A task suggestion or a question is accepted, not
+ * approved, so the kind on the event picks the verb. Kinds absent from a map
+ * keep the neutral "accepted the request" wording from the tables above, which
+ * is also the fallback for an event that carries no kind.
+ */
+const INTERACTION_ACCEPTED_LABELS: Record<string, string> = {
+  request_confirmation: "approved the request",
+  request_checkbox_confirmation: "approved the request",
+  suggest_tasks: "accepted the task suggestions",
+  ask_user_questions: "accepted the answers",
+};
+
+const INTERACTION_REJECTED_LABELS: Record<string, string> = {
+  request_confirmation: "rejected the request",
+  request_checkbox_confirmation: "rejected the request",
+  suggest_tasks: "declined the task suggestions",
+  ask_user_questions: "declined the questions",
+};
+
+/**
+ * Kind-aware wording for an interaction outcome, or `null` when the tables
+ * above already say it well enough.
+ */
+function formatInteractionOutcomeLabel(action: string, details: ActivityDetails): string | null {
+  const table = action === "issue.thread_interaction_accepted"
+    ? INTERACTION_ACCEPTED_LABELS
+    : action === "issue.thread_interaction_rejected"
+      ? INTERACTION_REJECTED_LABELS
+      : null;
+  if (!table) return null;
+  const kind = typeof details?.interactionKind === "string" ? details.interactionKind : null;
+  return kind ? table[kind] ?? null : null;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -386,6 +423,9 @@ export function formatActivityVerb(
     if (label) return `${label} on`;
   }
 
+  const outcomeLabel = formatInteractionOutcomeLabel(action, details);
+  if (outcomeLabel) return `${outcomeLabel} on`;
+
   const structuredChange = formatStructuredIssueChange({
     action,
     details,
@@ -425,6 +465,9 @@ export function formatIssueActivityAction(
     const label = decision ? STALLED_REVIEW_DECISION_LABELS[decision] : null;
     if (label) return label;
   }
+
+  const outcomeLabel = formatInteractionOutcomeLabel(action, details);
+  if (outcomeLabel) return outcomeLabel;
 
   if (action.startsWith("issue.monitor_") && details) {
     const serviceName = typeof details.serviceName === "string" && details.serviceName.trim()

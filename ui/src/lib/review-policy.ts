@@ -19,7 +19,7 @@ import { ISSUE_REVIEW_POLICIES, type IssueReviewPolicy } from "@paperclipai/shar
  * in `server/src/services/issue-review-policy.ts`.
  */
 
-export const DEFAULT_ISSUE_REVIEW_POLICY: IssueReviewPolicy = "anyone";
+const DEFAULT_ISSUE_REVIEW_POLICY: IssueReviewPolicy = "anyone";
 
 export interface IssueReviewPolicyCopy {
   value: IssueReviewPolicy;
@@ -75,16 +75,6 @@ export function issueReviewPolicyCopy(
   return COPY[resolveIssueReviewPolicy(policy)];
 }
 
-export function issueReviewPolicyLabel(policy: IssueReviewPolicy | null | undefined): string {
-  return issueReviewPolicyCopy(policy).label;
-}
-
-export function issueReviewPolicyApproverCopy(
-  policy: IssueReviewPolicy | null | undefined,
-): string {
-  return issueReviewPolicyCopy(policy).approverCopy;
-}
-
 /**
  * Mid-sentence wording for an activity line or a field-change receipt, where a
  * cleared column must read "anyone" rather than "none".
@@ -114,13 +104,3 @@ export function readIssueReviewPolicyMetadata(
 /** Picker options in "loosest first" order so the default reads as the baseline. */
 export const ISSUE_REVIEW_POLICY_OPTIONS: readonly IssueReviewPolicyCopy[] =
   ISSUE_REVIEW_POLICIES.map((policy) => COPY[policy]);
-
-/**
- * A constraint is worth calling out on the review card; the default is not.
- * The card stays quiet on `anyone` so the common case adds no noise.
- */
-export function isConstrainedIssueReviewPolicy(
-  policy: IssueReviewPolicy | null | undefined,
-): boolean {
-  return resolveIssueReviewPolicy(policy) !== DEFAULT_ISSUE_REVIEW_POLICY;
-}

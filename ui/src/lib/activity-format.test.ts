@@ -66,15 +66,44 @@ describe("activity formatting", () => {
     expect(formatIssueActivityAction("issue.monitor_recovery_issue_created")).toBe("created a monitor recovery issue");
   });
 
-  // PAP-16506 P4: agents can now approve or reject a review, so a verdict has to
-  // read as a verdict in the timeline instead of leaking the raw action id.
-  it("reads review verdicts as verdicts, whoever gave them", () => {
-    expect(formatIssueActivityAction("issue.thread_interaction_accepted")).toBe("approved the request");
+  // PAP-16506 P4: agents can now resolve an interaction, including a review of
+  // their own work, so an outcome has to read as an outcome in the timeline
+  // instead of leaking the raw action id.
+  it("reads an interaction outcome as an outcome, whoever gave it", () => {
+    expect(formatIssueActivityAction("issue.thread_interaction_accepted")).toBe("accepted the request");
     expect(formatIssueActivityAction("issue.thread_interaction_rejected")).toBe("rejected the request");
     expect(formatIssueActivityAction("issue.thread_interaction_withdrawn")).toBe("withdrew the request");
-    expect(formatIssueActivityAction("issue.thread_interaction_expired")).toBe("let the request expire");
-    expect(formatActivityVerb("issue.thread_interaction_accepted")).toBe("approved the request on");
+    expect(formatIssueActivityAction("issue.thread_interaction_expired")).toBe("expired the request");
+    expect(formatActivityVerb("issue.thread_interaction_accepted")).toBe("accepted the request on");
     expect(formatActivityVerb("issue.thread_interaction_rejected")).toBe("rejected the request on");
+  });
+
+  // The accepted/rejected actions fire for every interaction kind, so only a
+  // confirmation may read as an approval.
+  it("says 'approved' only for a confirmation, never for a suggestion or a question", () => {
+    expect(formatIssueActivityAction("issue.thread_interaction_accepted", { interactionKind: "request_confirmation" }))
+      .toBe("approved the request");
+    expect(formatIssueActivityAction("issue.thread_interaction_accepted", { interactionKind: "request_checkbox_confirmation" }))
+      .toBe("approved the request");
+    expect(formatIssueActivityAction("issue.thread_interaction_accepted", { interactionKind: "suggest_tasks" }))
+      .toBe("accepted the task suggestions");
+    expect(formatIssueActivityAction("issue.thread_interaction_accepted", { interactionKind: "ask_user_questions" }))
+      .toBe("accepted the answers");
+    expect(formatIssueActivityAction("issue.thread_interaction_rejected", { interactionKind: "request_confirmation" }))
+      .toBe("rejected the request");
+    expect(formatIssueActivityAction("issue.thread_interaction_rejected", { interactionKind: "suggest_tasks" }))
+      .toBe("declined the task suggestions");
+    expect(formatActivityVerb("issue.thread_interaction_accepted", { interactionKind: "suggest_tasks" }))
+      .toBe("accepted the task suggestions on");
+  });
+
+  it("keeps the neutral wording for a kind it does not know", () => {
+    expect(formatIssueActivityAction("issue.thread_interaction_accepted", { interactionKind: "request_item_verdicts" }))
+      .toBe("accepted the request");
+    expect(formatIssueActivityAction("issue.thread_interaction_accepted", { interactionKind: "future_kind" }))
+      .toBe("accepted the request");
+    expect(formatIssueActivityAction("issue.thread_interaction_accepted", { interactionKind: 7 }))
+      .toBe("accepted the request");
   });
 
   it("names the verb an actor chose on a stalled review", () => {

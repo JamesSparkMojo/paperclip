@@ -1,12 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  DEFAULT_ISSUE_REVIEW_POLICY,
   ISSUE_REVIEW_POLICY_OPTIONS,
   formatReviewPolicyValue,
-  isConstrainedIssueReviewPolicy,
-  issueReviewPolicyApproverCopy,
-  issueReviewPolicyLabel,
+  issueReviewPolicyCopy,
   readIssueReviewPolicyMetadata,
   resolveIssueReviewPolicy,
 } from "./review-policy";
@@ -15,7 +12,6 @@ describe("resolveIssueReviewPolicy", () => {
   it("treats a cleared column as the board default, not as an absent setting", () => {
     expect(resolveIssueReviewPolicy(null)).toBe("anyone");
     expect(resolveIssueReviewPolicy(undefined)).toBe("anyone");
-    expect(DEFAULT_ISSUE_REVIEW_POLICY).toBe("anyone");
   });
 
   it("passes the two opt-in constraints through", () => {
@@ -30,15 +26,15 @@ describe("resolveIssueReviewPolicy", () => {
 
 describe("policy copy", () => {
   it("labels every policy without leaking the enum value", () => {
-    expect(issueReviewPolicyLabel(null)).toBe("Anyone can approve");
-    expect(issueReviewPolicyLabel("not_creator")).toBe("Not the requester");
-    expect(issueReviewPolicyLabel("human_only")).toBe("People only");
+    expect(issueReviewPolicyCopy(null).label).toBe("Anyone can approve");
+    expect(issueReviewPolicyCopy("not_creator").label).toBe("Not the requester");
+    expect(issueReviewPolicyCopy("human_only").label).toBe("People only");
   });
 
   it("states who may give the verdict on each policy", () => {
-    expect(issueReviewPolicyApproverCopy(null)).toContain("Anyone with write access");
-    expect(issueReviewPolicyApproverCopy("not_creator")).toContain("other than the requester");
-    expect(issueReviewPolicyApproverCopy("human_only")).toContain("Requires a human");
+    expect(issueReviewPolicyCopy(null).approverCopy).toContain("Anyone with write access");
+    expect(issueReviewPolicyCopy("not_creator").approverCopy).toContain("other than the requester");
+    expect(issueReviewPolicyCopy("human_only").approverCopy).toContain("Requires a human");
   });
 
   it("offers exactly the three states the board defined, default first", () => {
@@ -49,11 +45,9 @@ describe("policy copy", () => {
     ]);
   });
 
-  it("marks only the opt-in constraints as constrained", () => {
-    expect(isConstrainedIssueReviewPolicy(null)).toBe(false);
-    expect(isConstrainedIssueReviewPolicy("anyone")).toBe(false);
-    expect(isConstrainedIssueReviewPolicy("not_creator")).toBe(true);
-    expect(isConstrainedIssueReviewPolicy("human_only")).toBe(true);
+  it("gives every policy a distinct icon so the row is scannable", () => {
+    const icons = ISSUE_REVIEW_POLICY_OPTIONS.map((option) => option.Icon);
+    expect(new Set(icons).size).toBe(icons.length);
   });
 });
 

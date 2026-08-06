@@ -2762,6 +2762,7 @@ export function accessRoutes(
       Boolean(req.actor.userId);
     const canApprove =
       isSignedInBoardUser &&
+      challenge.requestedScopeConfig !== null &&
       (challenge.requestedAccess !== "instance_admin_required" ||
         isLocalImplicit(req) ||
         Boolean(req.actor.isInstanceAdmin));

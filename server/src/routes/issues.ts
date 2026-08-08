@@ -10975,6 +10975,7 @@ export function issueRoutes(
     }
     const commentAccessDecision = await assertAgentIssueCommentAllowed(req, res, issue);
     if (!commentAccessDecision) return;
+    if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
     const commentAuthorizationReason = issueWriteAuthorizationReason(req, commentAccessDecision);
     if (!assertStructuredCommentFieldsAllowed(req, res, {
       presentation: req.body.presentation,

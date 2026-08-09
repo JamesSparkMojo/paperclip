@@ -358,6 +358,19 @@ const ISSUE_WAKE_LOCAL_ACTIVITY_ACTIONS = [
   "issue.inbox_archived",
   "issue.inbox_unarchived",
 ];
+// Event-driven wake reasons that carry discrete new activity (a fresh comment,
+// an @-mention, a blocker resolution) and therefore must NEVER be suppressed by
+// the no-new-activity skip — even when the issue's canonical lastActivityAt has
+// not advanced past the previous wake's marker. Without this exemption the
+// comment-wake batching test loses its deferred forward, the dependency test
+// loses its interaction wake on a blocked issue, and the responsible-user
+// invariant test loses all three of its user-driven wake cases. Throttle tests
+// continue to use `issue_assigned` and remain subject to the skip.
+const ISSUE_WAKE_REASONS_BYPASSING_NO_NEW_ACTIVITY_SKIP = new Set<string>([
+  "issue_commented",
+  "issue_comment_mentioned",
+  "issue_blockers_resolved",
+]);
 const WAKE_COMMENT_IDS_KEY = "wakeCommentIds";
 const PAPERCLIP_WAKE_PAYLOAD_KEY = "paperclipWake";
 const PAPERCLIP_AGENT_MESSAGE_KEY = "paperclipAgentMessage";
@@ -3322,6 +3335,7 @@ async function evaluateIssueWakeNoNewActivitySkip(input: {
   companyId: string;
   agentId: string;
   issueId: string;
+  reason: string | null;
 }) {
   const currentActivityAt = await readCanonicalIssueWakeActivityAt(input.dbOrTx, input.companyId, input.issueId);
   if (!currentActivityAt) {
@@ -3331,6 +3345,16 @@ async function evaluateIssueWakeNoNewActivitySkip(input: {
   const previousWake = await readLastIssueWakeActivityMarker(input);
   if (!previousWake) {
     return { skip: false as const, currentActivityAt, previousWake: null };
+  }
+
+  // Event-driven wake reasons (a new comment, an @-mention, a blocker resolution)
+  // carry discrete new activity by definition; suppressing them when the issue's
+  // canonical activity marker has not advanced past the previous wake's marker
+  // would break core heartbeat contracts. The marker update below still runs so
+  // subsequent throttled dispatches (e.g. an `issue_assigned` re-wake) see the
+  // freshest activity position.
+  if (input.reason && ISSUE_WAKE_REASONS_BYPASSING_NO_NEW_ACTIVITY_SKIP.has(input.reason)) {
+    return { skip: false as const, currentActivityAt, previousWake };
   }
 
   return {
@@ -17706,6 +17730,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           companyId: agent.companyId,
           agentId,
           issueId: issue.id,
+          reason,
         });
         if (activitySkip.currentActivityAt) {
           payloadForWake = issueWakePayloadWithActivityMarker(payloadForWake, issue.id, activitySkip.currentActivityAt);

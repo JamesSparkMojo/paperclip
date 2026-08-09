@@ -7654,6 +7654,36 @@ export function issueRoutes(
     );
     if (watchdogProductBugFollowUp === false) return;
     const effectiveParentId = watchdogProductBugFollowUp ? null : rawCreateBody.parentId;
+    // Machine law #16 (MACHINE-ORG-TEMPLATE §7 / FINAL-SPEC §12.2.1, SPA-2388): every Paperclip
+    // issue must have an assignee at creation. The reconciliation sweep's "owner exists"
+    // precondition can never rescue a card that has no owner — ownerless cards are
+    // structurally unwakeable. Reject with a friendly 4xx when neither assigneeAgentId nor
+    // assigneeUserId is provided. The watchdog product-bug carve-out (system-created cards
+    // with originKind: task_watchdog_product_bug) is exempt by lineage — those cards are
+    // minted by the platform itself and carry their origin explicitly.
+    if (
+      !watchdogProductBugFollowUp &&
+      rawCreateBody.assigneeAgentId == null &&
+      rawCreateBody.assigneeUserId == null
+    ) {
+      res.status(422).json({
+        error:
+          "Issue not created — every Paperclip issue must have an assignee at creation. " +
+          "Set `assigneeAgentId` or `assigneeUserId` and retry.",
+        details: {
+          requirement: "assigneeAgentId or assigneeUserId must be set",
+          received: {
+            assigneeAgentId: rawCreateBody.assigneeAgentId ?? null,
+            assigneeUserId: rawCreateBody.assigneeUserId ?? null,
+          },
+          remediation:
+            "Pass either `assigneeAgentId` (agent UUID) or `assigneeUserId` (user id) in the request body. " +
+            "Children inherit the parent's assignee automatically; the top-level create route does not.",
+          machineLaw: "MACHINE-ORG-TEMPLATE §7 law #16 / FINAL-SPEC §12.2.1 (SPA-2388)",
+        },
+      });
+      return;
+    }
     let createParent: Awaited<ReturnType<typeof svc.getById>> | null = null;
     if (req.actor.type === "agent" && !effectiveParentId && !watchdogProductBugFollowUp && !isTaskBridgeKeyActor(req)) {
       const companyScopeDecision = await access.decide({

@@ -13,6 +13,7 @@ describe("recovery model profile policy", () => {
       allowDeliverableWork: false,
       allowDocumentUpdates: false,
       resumeRequiresNormalModel: true,
+      forceFreshSession: true,
       modelProfile: "cheap",
     });
     expect(recoveryAssigneeAdapterOverrides("status_only")).toEqual({ modelProfile: "cheap" });

@@ -483,6 +483,23 @@ function requireBlockedStatusForUnblockDescriptor(
   }
 }
 
+function requireBlockedStatusHasBlockers(
+  value: { status?: string; blockedByIssueIds?: string[]; unblockDescriptor?: unknown },
+  ctx: z.RefinementCtx,
+) {
+  if (
+    value.status === "blocked"
+    && (!value.blockedByIssueIds || value.blockedByIssueIds.length === 0)
+    && value.unblockDescriptor == null
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "blocked status requires blockedByIssueIds (non-empty) or unblockDescriptor",
+      path: ["status"],
+    });
+  }
+}
+
 const createIssueDuplicateGuardSchema = {
   idempotencyKey: z.string().trim().min(1).max(255).optional().nullable(),
   allowDuplicate: z.boolean()
@@ -498,7 +515,8 @@ export const createIssueInputSchema = createIssueBaseSchema.extend({
 
 export const createIssueSchema = withCreateIssueStatusDefault(
   createIssueBaseSchema.extend(createIssueDuplicateGuardSchema),
-).superRefine(requireBlockedStatusForUnblockDescriptor);
+).superRefine(requireBlockedStatusForUnblockDescriptor)
+  .superRefine(requireBlockedStatusHasBlockers);
 
 export type CreateIssue = z.infer<typeof createIssueSchema>;
 
@@ -518,7 +536,8 @@ export const createChildIssueSchema = withCreateIssueStatusDefault(createIssueBa
   .extend({
     acceptanceCriteria: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
     blockParentUntilDone: z.boolean().optional().default(false),
-  })).superRefine(requireBlockedStatusForUnblockDescriptor);
+  })).superRefine(requireBlockedStatusForUnblockDescriptor)
+  .superRefine(requireBlockedStatusHasBlockers);
 
 export type CreateChildIssue = z.infer<typeof createChildIssueSchema>;
 

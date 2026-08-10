@@ -104,6 +104,49 @@ describe("issue validators", () => {
     }).success).toBe(false);
   });
 
+  it("rejects blocked status with no blocker edges and no unblockDescriptor", () => {
+    // blocked + no blockedByIssueIds + no unblockDescriptor -> rejected
+    expect(createIssueSchema.safeParse({
+      title: "No blockers",
+      status: "blocked",
+    }).success).toBe(false);
+
+    // blocked + empty blockedByIssueIds + no unblockDescriptor -> rejected
+    expect(createIssueSchema.safeParse({
+      title: "Empty blockers",
+      status: "blocked",
+      blockedByIssueIds: [],
+    }).success).toBe(false);
+
+    // blocked + non-empty blockedByIssueIds -> accepted
+    expect(createIssueSchema.safeParse({
+      title: "Has blocker",
+      status: "blocked",
+      blockedByIssueIds: ["00000000-0000-4000-8000-000000000001"],
+    }).success).toBe(true);
+
+    // blocked + unblockDescriptor -> accepted (no blockedByIssueIds needed)
+    expect(createIssueSchema.safeParse({
+      title: "Has unblock descriptor",
+      status: "blocked",
+      unblockDescriptor: { owner: "board", action: "Review the finding" },
+    }).success).toBe(true);
+
+    // blocked + both -> accepted
+    expect(createIssueSchema.safeParse({
+      title: "Has both",
+      status: "blocked",
+      blockedByIssueIds: ["00000000-0000-4000-8000-000000000001"],
+      unblockDescriptor: { owner: "board", action: "Review the finding" },
+    }).success).toBe(true);
+
+    // todo + no blockers -> accepted (only blocked requires blockers)
+    expect(createIssueSchema.safeParse({
+      title: "Just todo",
+      status: "todo",
+    }).success).toBe(true);
+  });
+
   it("rejects invalid task-scoped network egress CIDRs", () => {
     expect(updateIssueSchema.safeParse({
       executionWorkspaceSettings: {

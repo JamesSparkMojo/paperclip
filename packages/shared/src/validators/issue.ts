@@ -483,6 +483,23 @@ function requireBlockedStatusForUnblockDescriptor(
   }
 }
 
+function requireBlockedStatusHasBlockers(
+  value: { status?: string; blockedByIssueIds?: string[]; unblockDescriptor?: unknown },
+  ctx: z.RefinementCtx,
+) {
+  if (
+    value.status === "blocked"
+    && (!value.blockedByIssueIds || value.blockedByIssueIds.length === 0)
+    && value.unblockDescriptor == null
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "blocked status requires blockedByIssueIds (non-empty) or unblockDescriptor",
+      path: ["status"],
+    });
+  }
+}
+
 const createIssueDuplicateGuardSchema = {
   idempotencyKey: z.string().trim().min(1).max(255).optional().nullable(),
   allowDuplicate: z.boolean()
@@ -551,7 +568,7 @@ export const updateIssueSchema = createIssueBaseSchema.omit({
   resume: z.boolean().optional(),
   interrupt: z.boolean().optional(),
   hiddenAt: z.string().datetime().nullable().optional(),
-});
+}).strict();
 
 export type UpdateIssue = z.infer<typeof updateIssueSchema>;
 export type IssueExecutionWorkspaceSettings = z.infer<typeof issueExecutionWorkspaceSettingsSchema>;

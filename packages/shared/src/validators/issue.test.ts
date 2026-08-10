@@ -149,22 +149,23 @@ describe("issue validators", () => {
     });
   });
 
-  it("keeps issue attribution fields create-only", () => {
+  it("rejects create-only attribution fields on update", () => {
     const created = createIssueSchema.parse({
       title: "Preserve attribution input for route checks",
-      createdByUserId: "spoofed-creator",
-      responsibleUserId: "spoofed-responsible",
-    });
-    const updated = updateIssueSchema.parse({
-      title: "Do not update attribution",
       createdByUserId: "spoofed-creator",
       responsibleUserId: "spoofed-responsible",
     });
 
     expect(created.createdByUserId).toBe("spoofed-creator");
     expect(created.responsibleUserId).toBe("spoofed-responsible");
-    expect(updated).not.toHaveProperty("createdByUserId");
-    expect(updated).not.toHaveProperty("responsibleUserId");
+
+    expect(() =>
+      updateIssueSchema.parse({
+        title: "Do not update attribution",
+        createdByUserId: "spoofed-creator",
+        responsibleUserId: "spoofed-responsible",
+      }),
+    ).toThrow("Unrecognized key(s)");
   });
 
   it("allows false-positive recovery resolutions to atomically restore the source issue status", () => {

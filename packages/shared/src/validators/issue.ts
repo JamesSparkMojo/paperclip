@@ -630,6 +630,7 @@ export type IssueExecutionWorkspaceSettings = z.infer<typeof issueExecutionWorks
  * other silently-ignored extra key across every PATCH caller company-wide.
  */
 export const UNSUPPORTED_MONITOR_SCHEDULING_FLAT_FIELDS = [
+  "monitor",
   "monitorNextCheckAt",
   "monitorNotes",
   "monitorScheduledBy",

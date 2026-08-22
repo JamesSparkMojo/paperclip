@@ -67,7 +67,6 @@ import {
   upsertIssueDocumentSchema,
   updateIssueSchema,
   findUnsupportedMonitorSchedulingFields,
-  getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
   isMarkdownArtifactWorkProduct,
   isMarkdownAttachmentContent,

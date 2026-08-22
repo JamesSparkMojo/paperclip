@@ -26,6 +26,7 @@ export const issues = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id),
     projectId: uuid("project_id").references(() => projects.id),
     projectWorkspaceId: uuid("project_workspace_id").references(() => projectWorkspaces.id, { onDelete: "set null" }),
+    preferredRepoUrl: text("preferred_repo_url"),
     goalId: uuid("goal_id").references(() => goals.id),
     parentId: uuid("parent_id").references((): AnyPgColumn => issues.id),
     title: text("title").notNull(),

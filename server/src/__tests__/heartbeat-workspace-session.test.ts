@@ -2807,6 +2807,49 @@ describe("prioritizeProjectWorkspaceCandidatesForRun", () => {
       prioritizeProjectWorkspaceCandidatesForRun(rows, "workspace-9").map((row) => row.id),
     ).toEqual(["workspace-1", "workspace-2"]);
   });
+
+  it("bumps the matching repoUrl row to position 0 when no workspace id is preferred", () => {
+    const rows = [
+      { id: "workspace-1", repoUrl: "https://github.com/Spark-Mojo/spark-mojo-platform" },
+      { id: "workspace-2", repoUrl: "https://github.com/Spark-Mojo/sparkmojo-internal" },
+      { id: "workspace-3", repoUrl: "https://github.com/example/other" },
+    ];
+
+    expect(
+      prioritizeProjectWorkspaceCandidatesForRun(rows, null, "https://github.com/Spark-Mojo/sparkmojo-internal").map(
+        (row) => row.id,
+      ),
+    ).toEqual(["workspace-2", "workspace-1", "workspace-3"]);
+  });
+
+  it("leaves order intact when the preferred repoUrl does not match any candidate", () => {
+    const rows = [
+      { id: "workspace-1", repoUrl: "https://github.com/Spark-Mojo/spark-mojo-platform" },
+      { id: "workspace-2", repoUrl: "https://github.com/Spark-Mojo/sparkmojo-internal" },
+    ];
+
+    expect(
+      prioritizeProjectWorkspaceCandidatesForRun(rows, null, "https://github.com/example/missing").map(
+        (row) => row.id,
+      ),
+    ).toEqual(["workspace-1", "workspace-2"]);
+  });
+
+  it("lets an explicit preferredWorkspaceId win over a matching preferred repoUrl", () => {
+    const rows = [
+      { id: "workspace-1", repoUrl: "https://github.com/Spark-Mojo/sparkmojo-internal" },
+      { id: "workspace-2", repoUrl: "https://github.com/Spark-Mojo/spark-mojo-platform" },
+      { id: "workspace-3", repoUrl: "https://github.com/Spark-Mojo/sparkmojo-internal" },
+    ];
+
+    expect(
+      prioritizeProjectWorkspaceCandidatesForRun(
+        rows,
+        "workspace-2",
+        "https://github.com/Spark-Mojo/sparkmojo-internal",
+      ).map((row) => row.id),
+    ).toEqual(["workspace-2", "workspace-1", "workspace-3"]);
+  });
 });
 
 describe("parseSessionCompactionPolicy", () => {

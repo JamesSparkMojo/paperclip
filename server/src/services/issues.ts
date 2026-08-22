@@ -3083,6 +3083,7 @@ const issueListSelect = {
   companyId: issues.companyId,
   projectId: issues.projectId,
   projectWorkspaceId: issues.projectWorkspaceId,
+  preferredRepoUrl: issues.preferredRepoUrl,
   goalId: issues.goalId,
   parentId: issues.parentId,
   title: issues.title,
@@ -6976,6 +6977,10 @@ export function issueService(db: Db) {
 
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
+        const preferredRepoUrl =
+          typeof issueData.preferredRepoUrl === "string" && issueData.preferredRepoUrl.trim() !== ""
+            ? issueData.preferredRepoUrl
+            : null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
         let executionWorkspacePreference = issueData.executionWorkspacePreference ?? null;
         let executionWorkspaceSettings =
@@ -7074,6 +7079,30 @@ export function issueService(db: Db) {
               .where(and(eq(projectWorkspaces.projectId, issueData.projectId), eq(projectWorkspaces.companyId, companyId)))
               .orderBy(desc(projectWorkspaces.isPrimary), asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id))
               .then((rows) => rows[0]?.id ?? null);
+          }
+        }
+        if (!projectWorkspaceId && preferredRepoUrl) {
+          const baseFilter = issueData.projectId
+            ? and(
+                eq(projectWorkspaces.companyId, companyId),
+                eq(projectWorkspaces.projectId, issueData.projectId),
+                eq(projectWorkspaces.repoUrl, preferredRepoUrl),
+              )
+            : and(
+                eq(projectWorkspaces.companyId, companyId),
+                eq(projectWorkspaces.repoUrl, preferredRepoUrl),
+              );
+          const matched = await tx
+            .select({ id: projectWorkspaces.id, projectId: projectWorkspaces.projectId })
+            .from(projectWorkspaces)
+            .where(baseFilter)
+            .orderBy(desc(projectWorkspaces.isPrimary), asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id))
+            .limit(1);
+          if (matched[0]) {
+            projectWorkspaceId = matched[0].id;
+            if (issueData.projectId == null) {
+              issueData.projectId = matched[0].projectId;
+            }
           }
         }
         if (projectWorkspaceId) {

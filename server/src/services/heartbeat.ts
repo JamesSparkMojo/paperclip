@@ -2612,14 +2612,25 @@ export function buildRunWorkspaceHints(
 
 type ProjectWorkspaceCandidate = {
   id: string;
+  repoUrl?: string | null;
 };
 
 export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWorkspaceCandidate>(
   rows: T[],
   preferredWorkspaceId: string | null | undefined,
+  preferredRepoUrl?: string | null,
 ): T[] {
-  if (!preferredWorkspaceId) return rows;
-  const preferredIndex = rows.findIndex((row) => row.id === preferredWorkspaceId);
+  if (preferredWorkspaceId) {
+    const preferredIndex = rows.findIndex((row) => row.id === preferredWorkspaceId);
+    if (preferredIndex > 0) {
+      return [rows[preferredIndex]!, ...rows.slice(0, preferredIndex), ...rows.slice(preferredIndex + 1)];
+    }
+    return rows;
+  }
+  if (!preferredRepoUrl) return rows;
+  const normalizedPreferred = preferredRepoUrl.trim();
+  if (!normalizedPreferred) return rows;
+  const preferredIndex = rows.findIndex((row) => (row.repoUrl ?? "").trim() === normalizedPreferred);
   if (preferredIndex <= 0) return rows;
   return [rows[preferredIndex]!, ...rows.slice(0, preferredIndex), ...rows.slice(preferredIndex + 1)];
 }
@@ -8437,6 +8448,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .select({
             projectId: issues.projectId,
             projectWorkspaceId: issues.projectWorkspaceId,
+            preferredRepoUrl: issues.preferredRepoUrl,
           })
           .from(issues)
           .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
@@ -8445,6 +8457,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const issueProjectId = issueProjectRef?.projectId ?? null;
     const preferredProjectWorkspaceId =
       issueProjectRef?.projectWorkspaceId ?? contextProjectWorkspaceId ?? null;
+    const preferredRepoUrl = issueProjectRef?.preferredRepoUrl ?? null;
     const resolvedProjectId = issueProjectId ?? contextProjectId;
     const useProjectWorkspace = opts?.useProjectWorkspace !== false;
     const workspaceProjectId = useProjectWorkspace ? resolvedProjectId : null;
@@ -8464,6 +8477,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const projectWorkspaceRows = prioritizeProjectWorkspaceCandidatesForRun(
       unorderedProjectWorkspaceRows,
       preferredProjectWorkspaceId,
+      preferredRepoUrl,
     );
 
     const workspaceHints = projectWorkspaceRows.map((workspace) => ({

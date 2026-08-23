@@ -6052,10 +6052,26 @@ export function issueRoutes(
     const mentionedProjects = mentionedProjectIds.length > 0
       ? await projectsSvc.listByIds(issue.companyId, mentionedProjectIds)
       : [];
-    const currentExecutionWorkspace = issue.executionWorkspaceId
-      ? await executionWorkspacesSvc.getById(issue.executionWorkspaceId)
-      : null;
-    const workProducts = await workProductsSvc.listForIssue(issue.id);
+    const [currentExecutionWorkspace, workProducts, pendingInteractions] = await Promise.all([
+      issue.executionWorkspaceId
+        ? executionWorkspacesSvc.getById(issue.executionWorkspaceId)
+        : Promise.resolve(null),
+      workProductsSvc.listForIssue(issue.id),
+      issueThreadInteractionsSvc
+        .listForIssue(issue.id)
+        .then((rows) =>
+          rows
+            .filter((r) => r.status === "pending")
+            .map((r) => ({
+              id: r.id,
+              kind: r.kind,
+              title: (r as { title?: string | null }).title ?? null,
+              status: r.status,
+              createdAt: (r as { createdAt?: string }).createdAt ?? null,
+              createdByAgentId: (r as { createdByAgentId?: string | null }).createdByAgentId ?? null,
+            })),
+        ),
+    ]);
     res.json({
       ...issue,
       ...inboxArchiveFields,
@@ -6078,6 +6094,7 @@ export function issueRoutes(
       currentExecutionWorkspace: compactIssueExecutionWorkspace(currentExecutionWorkspace),
       workProducts,
       linkedCases,
+      ...(pendingInteractions.length > 0 ? { pendingInteractions } : {}),
     });
   });
 

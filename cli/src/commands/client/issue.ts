@@ -236,15 +236,42 @@ export function registerIssueCommands(program: Command): void {
       .action(async (idOrIdentifier: string, opts: BaseClientOptions & { includeInteractions?: boolean }) => {
         try {
           const ctx = resolveCommandContext(opts);
-          const row = await ctx.api.get<Issue>(apiPath`/api/issues/${idOrIdentifier}`);
+          type IssueWithPending = Issue & {
+            pendingInteractions?: Array<{
+              id: string;
+              kind: string;
+              title: string | null;
+              status: string;
+              createdAt: string | null;
+              createdByAgentId?: string | null;
+              summary?: string | null;
+            }>;
+          };
+          const row = (await ctx.api.get<IssueWithPending>(apiPath`/api/issues/${idOrIdentifier}`)) as IssueWithPending;
+          const serverPending = (row as unknown as Record<string, unknown>).pendingInteractions as unknown[] | undefined;
           const includeInteractions = opts.includeInteractions ?? (!ctx.json && Boolean(process.stdout.isTTY));
+          // Server now embeds pendingInteractions (SPA-4929); prefer it over client augmentation.
+          if (Array.isArray(serverPending)) {
+            if (!includeInteractions && serverPending.length === 0) {
+              // Strip empty array for backwards-compat json shape when not requesting interactions.
+              const { pendingInteractions: _omit, ...rest } = row as unknown as Record<string, unknown>;
+              printOutput(rest, { json: ctx.json });
+              return;
+            }
+            if (ctx.json) {
+              printOutput(row, { json: true });
+              return;
+            }
+            // Human mode: print issue JSON then formatted pending block for scanability.
+            printOutput(row, { json: false });
+            if (serverPending.length > 0) formatPendingInteractions(serverPending as unknown as IssueWithPending["pendingInteractions"] & {});
+            return;
+          }
+          // Fallback for older servers that don't embed pendingInteractions: client-side fetch behind flag.
           if (!includeInteractions) {
             printOutput(row, { json: ctx.json });
             return;
           }
-          // ponytail: pending-only filter — terminal statuses (accepted/rejected/answered/cancelled/expired/failed)
-          // are not "awaiting James"; surfacing them defeats the warning signal. Status set lives in
-          // @paperclipai/shared ISSUE_THREAD_INTERACTION_STATUSES.
           const interactions = await ctx.api.get<IssueThreadInteraction[]>(
             apiPath`/api/issues/${idOrIdentifier}/interactions`,
           );
@@ -252,18 +279,48 @@ export function registerIssueCommands(program: Command): void {
             .filter((i) => i.status === "pending")
             .map((i) => ({
               id: i.id,
-              kind: i.kind,
-              status: i.status,
-              title: i.title ?? null,
-              summary: i.summary ?? null,
-              createdAt: i.createdAt,
+              kind: i.kind as string,
+              status: i.status as string,
+              title: (i as { title?: string | null }).title ?? null,
+              summary: (i as { summary?: string | null }).summary ?? null,
+              createdAt: String((i as { createdAt?: string | Date | null }).createdAt ?? ""),
+              createdByAgentId: (i as { createdByAgentId?: string | null }).createdByAgentId ?? null,
             }));
-          printOutput({ ...row, pendingInteractions }, { json: ctx.json });
+          if (ctx.json) {
+            printOutput({ ...row, pendingInteractions }, { json: true });
+            return;
+          }
+          printOutput({ ...row, pendingInteractions }, { json: false });
+          if (pendingInteractions.length > 0) formatPendingInteractions(pendingInteractions as unknown as Parameters<typeof formatPendingInteractions>[0]);
         } catch (err) {
           handleCommandError(err);
         }
       }),
   );
+
+function formatPendingInteractions(
+  rows: Array<{ id: string; kind: string; title: string | null; status: string; createdAt: string | null; createdByAgentId?: string | null }>,
+): void {
+  // Keep human rendering tiny and greppable — one line per pending item.
+  const now = Date.now();
+  for (const r of rows) {
+    const age = r.createdAt ? formatAge(now - new Date(r.createdAt).getTime()) : "?";
+    const title = r.title ? ` title="${r.title.replace(/"/g, "'").slice(0, 80)}"` : "";
+    console.log(`  pendingInteraction id=${r.id} kind=${r.kind} status=${r.status} age=${age}${title}`);
+  }
+}
+
+function formatAge(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "?";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d`;
+}
 
   addCommonClientOptions(
     issue

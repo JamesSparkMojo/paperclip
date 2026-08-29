@@ -172,6 +172,7 @@ import {
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
+import { getLatestBuildReceiptForIssue } from "../services/build-receipts.js";
 import { decisionTrainingService } from "../services/decision-training.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -11997,6 +11998,50 @@ export function issueRoutes(
     });
 
     res.json({ ok: true });
+  });
+
+  // ADR-0058 Decision 5 Phase 2 R1 surface: the build-receipt reader.
+  // The detector (build-receipt-check.mjs) calls this instead of parsing a
+  // comment. The schema is identical to the Phase-1 self-emitted receipt so
+  // existing detector schema-validation logic applies unchanged.
+  router.get("/issues/:id/build-receipts/latest", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+
+    const receipt = await getLatestBuildReceiptForIssue({
+      db,
+      companyId: issue.companyId,
+      issueId: issue.id,
+    });
+    if (!receipt) {
+      res.status(404).json({
+        error: "no build receipt",
+        message: `no build_receipts row exists for issue ${issue.id}`,
+      });
+      return;
+    }
+
+    res.json({
+      v: 1,
+      card: receipt.card,
+      issue_id: receipt.issueId,
+      run_id: receipt.heartbeatRunId,
+      attempt_id: receipt.attemptId,
+      generation: receipt.generation,
+      skill: typeof receipt.metadata?.["contextSnapshotSkill"] === "string"
+        ? receipt.metadata["contextSnapshotSkill"]
+        : null,
+      started_at: receipt.startedAt.toISOString(),
+      finished_at: receipt.finishedAt.toISOString(),
+      tree_sha: receipt.treeSha,
+      branch: receipt.branch,
+      remote_verified: receipt.remoteVerified,
+      gates: receipt.gates,
+      ledger_path: null,
+      exit: receipt.exit,
+    });
   });
 
   return router;

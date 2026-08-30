@@ -8856,6 +8856,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         payload: buildHeartbeatRunStatusLiveEventPayload(updated),
       });
       publishRunLifecyclePluginEvent(updated);
+      // ADR-0058 Decision 5 Phase 2 R1: also emit when canonical success
+      // finalization flows through setRunStatusIfRunning (the normal adaptor
+      // finalizer path at ~15767). Mirrors the setRunStatus branch above.
+      if (updated.status === "succeeded") {
+        emitBuildReceiptForRun({ db, run: updated }).catch((err) => {
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err), runId: updated.id },
+            "build-receipts: emit threw -- swallowing (fail-open)",
+          );
+        });
+      }
       return { run: updated, updated: true as const };
     }
 

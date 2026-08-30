@@ -3256,13 +3256,34 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           notInArray(issues.status, ["done", "cancelled"]),
         ),
       );
-    const blockedByIssueIds = [...new Set([...existingBlockers.map((row) => row.id), ...openChildren.map((row) => row.id)])];
+    // Cycle guard for AWAITING-YOU shape (SPA-5458): if an open child
+    // already has a `blocks` edge *into* this parent, adding the child to
+    // the parent's `blockedBy` would create parent<->child cycle, throwing
+    // `422 Blocking relations cannot contain cycles` in `issues.update`.
+    // Exclude those children from the new blockedBy set.
+    const childrenCreatingParentEdge = await db
+      .select({ relatedIssueId: issueRelations.relatedIssueId })
+      .from(issueRelations)
+      .where(
+        and(
+          eq(issueRelations.companyId, issue.companyId),
+          eq(issueRelations.type, "blocks"),
+          inArray(
+            issueRelations.issueId,
+            openChildren.map((c) => c.id),
+          ),
+          eq(issueRelations.relatedIssueId, issue.id),
+        ),
+      );
+    const excludeIds = new Set(childrenCreatingParentEdge.map((r) => r.relatedIssueId));
+    const safeChildren = openChildren.filter((c) => !excludeIds.has(c.id));
+    const blockedByIssueIds = [...new Set([...existingBlockers.map((row) => row.id), ...safeChildren.map((row) => row.id)])];
     if (blockedByIssueIds.length === 0) return null;
 
     const updated = await issuesSvc.update(issue.id, { status: "blocked", blockedByIssueIds });
     if (!updated) return null;
 
-    const waitingOn = formatIssueLinksForComment([...openChildren, ...existingBlockers]);
+    const waitingOn = formatIssueLinksForComment([...safeChildren, ...existingBlockers]);
     await issuesSvc.addComment(
       issue.id,
       `This task is waiting on ${waitingOn} to finish. ` +
@@ -3676,6 +3697,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     };
 
     for (const issue of candidates) {
+      // Per-issue isolation (SPA-5458): one stranded card must never abort
+      // fleet recovery. Cycles, race losses, or any other per-issue failure
+      // is logged + skipped; the surrounding pass continues with the next
+      // candidate. Before this guard, a single card that tripped
+      // `assertNoBlockingCycles` would throw out of the whole reconcile pass,
+      // freezing periodic re-wakes fleet-wide for ~30s per tick.
+      try {
       const executionState = issue.status === "in_review"
         ? parseIssueExecutionState(issue.executionState)
         : null;
@@ -4291,9 +4319,22 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       } else {
         result.skipped += 1;
       }
+      } catch (err) {
+        logger.error(
+          { err, issueId: issue.id, identifier: issue.identifier, companyId: issue.companyId },
+          "reconcileStrandedAssignedIssues per-issue failure; skipping and continuing (SPA-5458)",
+        );
+        result.skipped += 1;
+      }
     }
 
-    const orphanBlockerRecovery = await reconcileUnassignedBlockingIssues();
+    let orphanBlockerRecovery: { assigned: number; skipped: number; issueIds: string[] };
+    try {
+      orphanBlockerRecovery = await reconcileUnassignedBlockingIssues();
+    } catch (err) {
+      logger.error({ err }, "reconcileUnassignedBlockingIssues failed; skipping");
+      orphanBlockerRecovery = { assigned: 0, skipped: 0, issueIds: [] };
+    }
     result.orphanBlockersAssigned = orphanBlockerRecovery.assigned;
     result.skipped += orphanBlockerRecovery.skipped;
     result.issueIds.push(...orphanBlockerRecovery.issueIds);

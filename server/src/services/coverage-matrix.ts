@@ -22,7 +22,7 @@ export interface CoverageResult {
 
 export function extractRequirementsSection(description: string | null | undefined): string | null {
   if (typeof description !== "string") return null;
-  const m = description.match(/^## Requirements\s*$/m);
+  const m = description.match(/^##\s+Requirements\b/m);
   if (!m || m.index === undefined) return null;
   const start = m.index + m[0].length;
   const rest = description.slice(start);

@@ -42,6 +42,7 @@ export function validateReceiptRow(row: {
   heartbeatRunId?: string | null;
   attemptId?: string | null;
   generation?: number | null;
+  metadata?: Record<string, unknown> | null;
 } | null): ReceiptGateResult {
   const reasons: string[] = [];
   if (!row) {
@@ -67,6 +68,14 @@ export function validateReceiptRow(row: {
   }
   if (!row.exit || typeof row.exit !== "string" || row.exit.length === 0) {
     reasons.push("receipt exit missing");
+  }
+  // R1 stores the raw ledger parse outcome in `metadata.ledger_status`.
+  // A value of "malformed" means the file was present but empty/unparseable;
+  // the receipt exists but its backing ledger cannot be trusted. Treat as a
+  // gate failure so R5/Dex merge-gate-2 can distinguish the row from "no
+  // receipt". Flag for SPA-5180; this intentionally fails-closed.
+  if (row.metadata && (row.metadata as Record<string, unknown>)["ledger_status"] === "malformed") {
+    reasons.push("receipt ledger_status is malformed");
   }
   // branch is nullable in schema but for R2 we require it to be a non-empty string
   // when present -- a null branch still indicates the emitter ran but lacked
@@ -119,6 +128,7 @@ export async function assertReviewToApprovalGates(input: {
           heartbeatRunId: (receipt as unknown as { heartbeatRunId: string }).heartbeatRunId,
           attemptId: (receipt as unknown as { attemptId: string }).attemptId,
           generation: (receipt as unknown as { generation: number }).generation,
+          metadata: (receipt as unknown as { metadata: Record<string, unknown> | null }).metadata,
         }
       : null,
   );

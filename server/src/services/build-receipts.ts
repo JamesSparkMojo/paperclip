@@ -21,9 +21,9 @@
 // If any of those are required, route to the matching card -- this file's
 // scope is the emitter and the read endpoint.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -116,29 +116,15 @@ export async function verifyRemoteHasCommit(
 ): Promise<RemoteVerification> {
   const stdout = await runGit(cwd, ["remote", "get-url", "origin"]);
   if (!stdout) return "unknown";
-  // ls-remote exits 0 with empty output when the ref does not exist -- so an
-  // empty result is a definitive "unverified", not a check failure. Use
-  // spawnSync for the exit-code contract and treat a non-zero exit as
-  // "unknown" (network / auth failure), not "unverified".
-  try {
-    const result = spawnSync(
-      "git",
-      ["ls-remote", "origin", sha, "refs/heads/*"],
-      { cwd, encoding: "utf8", timeout: LEDGER_TIMEOUT_MS },
-    );
-    if (result.error || typeof result.status !== "number" || result.status !== 0) {
-      return "unknown";
-    }
-    const out = result.stdout ?? "";
-    // The commit is remote-verified when ls-remote sees either the bare SHA
-    // (some forges allow it) or a ref tip pointing at it.
-    const found = out
-      .split("\n")
-      .some((line) => line.trim().split(/\s+/)[0]?.toLowerCase() === sha.toLowerCase());
-    return found ? "verified" : "unverified";
-  } catch {
-    return "unknown";
-  }
+  // ls-remote exits 0 with empty output when sha not on remote -- definitive
+  // "unverified", not a failure. Non-zero exit / timeout => "unknown". Uses
+  // async spawn (same runGit timeout) so event loop not blocked.
+  const out = await runGit(cwd, ["ls-remote", "origin", sha, "refs/heads/*"]);
+  if (out === null) return "unknown";
+  const found = out
+    .split("\n")
+    .some((line) => line.trim().split(/\s+/)[0]?.toLowerCase() === sha.toLowerCase());
+  return found ? "verified" : "unverified";
 }
 
 // Port of gate-check.mjs's --status parser (strict format, ~40 lines): a
@@ -193,8 +179,10 @@ export function parseLedgerForIssue(
     return { status: "missing", counts: { met: 0, unmet: 0, abandoned: 0 }, path: null };
   }
   // Reject anything that escapes the workspace.
-  const full = isAbsolute(named) ? named : join(cwd, named);
-  if (!full.startsWith(cwd)) {
+  const full = isAbsolute(named) ? resolve(named) : resolve(join(cwd, named));
+  const cwdNorm = resolve(cwd);
+  const inside = full === cwdNorm || full.startsWith(cwdNorm + "/");
+  if (!inside) {
     return { status: "missing", counts: { met: 0, unmet: 0, abandoned: 0 }, path: named };
   }
   let text: string;
@@ -202,6 +190,9 @@ export function parseLedgerForIssue(
     text = readFileSync(full, "utf8");
   } catch {
     return { status: "missing", counts: { met: 0, unmet: 0, abandoned: 0 }, path: named };
+  }
+  if (text.trim().length === 0) {
+    return { status: "malformed", counts: { met: 0, unmet: 0, abandoned: 0 }, path: named };
   }
   try {
     return { status: "parsed", counts: parseUnlazyLedger(text), path: named };

@@ -2551,6 +2551,60 @@ registry.registerPath({
 // run-finished lifecycle hook (heartbeat.ts), never builder-posted; this is
 // the read side of that contract (see ADR-0058 Decision 5 Phase 2).
 registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/deploy-leases",
+  tags: ["issues"],
+  summary: "Acquire a deploy lease (R4 fencing: one deploy at a time on UAT)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 201: r.created, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/issues/{id}/deploy-leases/{leaseId}",
+  tags: ["issues"],
+  summary: "Release a deploy lease",
+  request: { params: z.object({ id: z.string(), leaseId: z.string() }) },
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/deploy-leases/{leaseId}/heartbeat",
+  tags: ["issues"],
+  summary: "Heartbeat a deploy lease",
+  request: { params: z.object({ id: z.string(), leaseId: z.string() }) },
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/builder-fences",
+  tags: ["issues"],
+  summary: "Acquire a per-worktree builder fence (R4: one builder per path+generation)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 201: r.created, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/issues/{id}/builder-fences/{fenceId}",
+  tags: ["issues"],
+  summary: "Release a builder fence",
+  request: { params: z.object({ id: z.string(), fenceId: z.string() }) },
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/builder-fences/{fenceId}/heartbeat",
+  tags: ["issues"],
+  summary: "Heartbeat a builder fence",
+  request: { params: z.object({ id: z.string(), fenceId: z.string() }) },
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
   method: "get",
   path: "/api/issues/{id}/build-receipts/latest",
   tags: ["issues"],

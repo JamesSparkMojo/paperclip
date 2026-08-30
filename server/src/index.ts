@@ -1256,6 +1256,12 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "periodic tool connection health sweep failed");
           }));
 
+        trackHeartbeatSchedulerWork(import("../services/concurrency-fences.js").then(({ sweepExpiredFences }) => sweepExpiredFences(db as never)).then((r) => {
+          if (r.deployExpired > 0 || r.builderExpired > 0) logger.info(r, "fence sweep reclaimed expired leases");
+        }).catch((err) => {
+          logger.error({ err }, "fence sweep failed");
+        }));
+
         trackHeartbeatSchedulerWork(secretProposals.sweepExpired()
           .then((expired) => {
             if (expired > 0) logger.warn({ expired }, "periodic secret proposal expiry scrubbed proposals");

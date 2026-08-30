@@ -173,6 +173,14 @@ import {
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { getLatestBuildReceiptForIssue } from "../services/build-receipts.js";
+import {
+  acquireBuilderFence,
+  acquireDeployLease,
+  heartbeatBuilderFence,
+  heartbeatDeployLease,
+  releaseBuilderFence,
+  releaseDeployLease,
+} from "../services/concurrency-fences.js";
 import { decisionTrainingService } from "../services/decision-training.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -11998,6 +12006,71 @@ export function issueRoutes(
     });
 
     res.json({ ok: true });
+  });
+
+  // R4 fencing -- deploy cap 1 on UAT + per-worktree builder fence (ADR-0058/0059 Phase 2).
+  router.post("/issues/:id/deploy-leases", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    const heartbeatRunId = typeof (req.body as Record<string, unknown>)?.heartbeatRunId === "string"
+      ? (req.body as Record<string, unknown>).heartbeatRunId as string
+      : null;
+    const environment = typeof (req.body as Record<string, unknown>)?.environment === "string"
+      ? ((req.body as Record<string, unknown>).environment as string)
+      : "uat";
+    const lease = await acquireDeployLease({ db, companyId: issue.companyId, heartbeatRunId, issueId: issue.id, environment });
+    res.status(201).json(lease);
+  });
+
+  router.delete("/issues/:id/deploy-leases/:leaseId", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    await releaseDeployLease({ db, leaseId: req.params.leaseId as string, companyId: issue.companyId });
+    res.status(204).send();
+  });
+
+  router.post("/issues/:id/deploy-leases/:leaseId/heartbeat", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    await heartbeatDeployLease({ db, leaseId: req.params.leaseId as string, companyId: issue.companyId });
+    res.status(204).send();
+  });
+
+  router.post("/issues/:id/builder-fences", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    const body = req.body as Record<string, unknown>;
+    const worktreePath = typeof body?.worktreePath === "string" ? (body.worktreePath as string) : "";
+    const generation = typeof body?.generation === "number" ? (body.generation as number) : 1;
+    const heartbeatRunId = typeof body?.heartbeatRunId === "string" ? (body.heartbeatRunId as string) : null;
+    const fence = await acquireBuilderFence({ db, companyId: issue.companyId, worktreePath, generation, heartbeatRunId, issueId: issue.id });
+    res.status(201).json(fence);
+  });
+
+  router.delete("/issues/:id/builder-fences/:fenceId", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    await releaseBuilderFence({ db, fenceId: req.params.fenceId as string, companyId: issue.companyId });
+    res.status(204).send();
+  });
+
+  router.post("/issues/:id/builder-fences/:fenceId/heartbeat", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    await heartbeatBuilderFence({ db, fenceId: req.params.fenceId as string, companyId: issue.companyId });
+    res.status(204).send();
   });
 
   // ADR-0058 Decision 5 Phase 2 R1 surface: the build-receipt reader.

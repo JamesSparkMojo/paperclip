@@ -2547,6 +2547,18 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
+// SPA-5175 R1: build-receipt reader. The receipt row is server-emitted on the
+// run-finished lifecycle hook (heartbeat.ts), never builder-posted; this is
+// the read side of that contract (see ADR-0058 Decision 5 Phase 2).
+registry.registerPath({
+  method: "get",
+  path: "/api/issues/{id}/build-receipts/latest",
+  tags: ["issues"],
+  summary: "Get the latest server-emitted build receipt for an issue",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
 registry.registerPath({
   method: "get",
   path: "/api/companies/{companyId}/labels",

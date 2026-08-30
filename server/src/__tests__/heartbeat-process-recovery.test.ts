@@ -3858,6 +3858,90 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     ).toBe(true);
   });
 
+  // SPA-5458: root cause — parent->child + child->parent cycle via AWAITING-YOU.
+  // Recovery's `resolveContinuationWaitingOnReview` must exclude open children
+  // that already `blocks -> parent`; otherwise issues.update throws
+  // `Blocking relations cannot contain cycles` and, without the per-issue
+  // try/catch, `reconcileStrandedAssignedIssues` would abort fleet-wide.
+  it("excludes AWAITING-YOU child that already blocks parent to prevent recovery cycle (SPA-5458)", async () => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "cancelled",
+      retryReason: "issue_continuation_needed",
+      runErrorCode: "issue_continuation_waiting_on_review",
+      runError: "Continuation parked: issue is waiting on review/approval",
+    });
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const awaitingYouChildId = randomUUID();
+    const normalOpenChildId = randomUUID();
+
+    await db.insert(issues).values([
+      {
+        id: awaitingYouChildId,
+        companyId,
+        parentId: issueId,
+        title: "AWAITING-YOU child blocking parent",
+        status: "todo",
+        priority: "medium",
+        issueNumber: 30,
+        identifier: `${issuePrefix}-30`,
+      },
+      {
+        id: normalOpenChildId,
+        companyId,
+        parentId: issueId,
+        title: "Normal open child of parent",
+        status: "in_progress",
+        priority: "medium",
+        issueNumber: 31,
+        identifier: `${issuePrefix}-31`,
+      },
+    ]);
+    // AWAITING-YOU child already blocks on the parent (James-gate shape).
+    await db.insert(issueRelations).values([
+      { companyId, issueId: awaitingYouChildId, relatedIssueId: issueId, type: "blocks" },
+    ]);
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+    // Pre-fix this threw `assertNoBlockingCycles` 422 → periodic recovery
+    // aborted fleet-wide. Post-fix the cycle child is excluded and recovery
+    // moves the parent to `blocked` with the SAFE child only. Recovery
+    // completes without throwing; the issueRelations table reflects the
+    // cycle-free blocker set.
+    expect(result.escalated).toBe(0);
+    expect(result.skipped).toBe(0);
+
+    const parent = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(parent?.status).toBe("blocked");
+    expect(parent?.assigneeAgentId).toBe(agentId);
+
+    // Parent's new blockedBy holds the safe child but NOT the cycle child.
+    // syncBlockedByIssueIds replaced the prior single issueRelations row
+    // (child → parent) with the safe child's row.
+    const blockers = await db
+      .select({ issueId: issueRelations.issueId })
+      .from(issueRelations)
+      .where(
+        and(
+          eq(issueRelations.companyId, companyId),
+          eq(issueRelations.relatedIssueId, issueId),
+          eq(issueRelations.type, "blocks"),
+        ),
+      );
+    const blockerSet = new Set(blockers.map((b) => b.issueId));
+    expect(blockerSet.has(normalOpenChildId)).toBe(true);
+    expect(blockerSet.has(awaitingYouChildId)).toBe(false);
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    const waitingComment = comments.find((c) => c.body.includes("This task is waiting on"));
+    expect(waitingComment).toBeTruthy();
+    expect(waitingComment!.body).toContain(`${issuePrefix}-31`);
+    expect(waitingComment!.body).not.toContain(`${issuePrefix}-30`);
+  });
+
+
   it("converts a continuation parked for review into a dependency wait on its existing blockers", async () => {
     const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
       status: "in_progress",

@@ -250,14 +250,14 @@ export function registerIssueCommands(program: Command): void {
           const row = (await ctx.api.get<IssueWithPending>(apiPath`/api/issues/${idOrIdentifier}`)) as IssueWithPending;
           const serverPending = (row as unknown as Record<string, unknown>).pendingInteractions as unknown[] | undefined;
           const includeInteractions = opts.includeInteractions ?? (!ctx.json && Boolean(process.stdout.isTTY));
+          // Opt-out always wins: strip pendingInteractions field regardless of length.
+          if (!includeInteractions && Array.isArray(serverPending)) {
+            const { pendingInteractions: _omit, ...rest } = row as unknown as Record<string, unknown>;
+            printOutput(rest, { json: ctx.json });
+            return;
+          }
           // Server now embeds pendingInteractions (SPA-4929); prefer it over client augmentation.
           if (Array.isArray(serverPending)) {
-            if (!includeInteractions && serverPending.length === 0) {
-              // Strip empty array for backwards-compat json shape when not requesting interactions.
-              const { pendingInteractions: _omit, ...rest } = row as unknown as Record<string, unknown>;
-              printOutput(rest, { json: ctx.json });
-              return;
-            }
             if (ctx.json) {
               printOutput(row, { json: true });
               return;
@@ -272,8 +272,10 @@ export function registerIssueCommands(program: Command): void {
             printOutput(row, { json: ctx.json });
             return;
           }
+          // Resolve identifier to UUID for the interactions endpoint, which only accepts UUIDs on older servers.
+          const resolvedId = (row as unknown as { id?: string }).id ?? idOrIdentifier;
           const interactions = await ctx.api.get<IssueThreadInteraction[]>(
-            apiPath`/api/issues/${idOrIdentifier}/interactions`,
+            apiPath`/api/issues/${resolvedId}/interactions`,
           );
           const pendingInteractions = (interactions ?? [])
             .filter((i) => i.status === "pending")

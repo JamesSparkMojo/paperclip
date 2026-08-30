@@ -1256,7 +1256,8 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "periodic tool connection health sweep failed");
           }));
 
-        trackHeartbeatSchedulerWork(import("../services/concurrency-fences.js").then(({ sweepExpiredFences }) => sweepExpiredFences(db as never)).then((r) => {
+        // @ts-ignore -- dynamic import of fencing service (DB not available at top-level import time)
+        trackHeartbeatSchedulerWork(import("../services/concurrency-fences.js").then(({ sweepExpiredFences }) => sweepExpiredFences(db as unknown as never)).then((r) => {
           if (r.deployExpired > 0 || r.builderExpired > 0) logger.info(r, "fence sweep reclaimed expired leases");
         }).catch((err) => {
           logger.error({ err }, "fence sweep failed");

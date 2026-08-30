@@ -71,7 +71,7 @@ export async function acquireDeployLease(input: {
       status: "active",
       heartbeatRunId: input.heartbeatRunId ?? null,
       issueId: input.issueId ?? null,
-      generation: existing ? (existing.generation as number) + 1 : 1,
+      generation: 1,
       acquiredAt: new Date(),
       lastHeartbeatAt: new Date(),
     })

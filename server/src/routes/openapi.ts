@@ -2556,7 +2556,7 @@ registry.registerPath({
   tags: ["issues"],
   summary: "Acquire a deploy lease (R4 fencing: one deploy at a time on UAT)",
   request: { params: z.object({ id: z.string() }) },
-  responses: { 201: r.created, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
+  responses: { 201: r.ok(), 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
 });
 
 registry.registerPath({
@@ -2583,7 +2583,7 @@ registry.registerPath({
   tags: ["issues"],
   summary: "Acquire a per-worktree builder fence (R4: one builder per path+generation)",
   request: { params: z.object({ id: z.string() }) },
-  responses: { 201: r.created, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
+  responses: { 201: r.ok(), 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
 });
 
 registry.registerPath({

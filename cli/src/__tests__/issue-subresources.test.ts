@@ -110,6 +110,194 @@ describe("issue subresource commands", () => {
     ]);
   });
 
+  it("strips server-embedded pendingInteractions when --no-include-interactions is set (P1 fix SPA-4929)", async () => {
+    const embeddedRow = {
+      id: ISSUE_ID,
+      status: "todo",
+      pendingInteractions: [
+        {
+          id: INTERACTION_ID,
+          kind: "request_confirmation",
+          title: "Approve PR",
+          status: "pending",
+          createdAt: "2026-08-22T00:00:00Z",
+          createdByAgentId: null,
+        },
+      ],
+    };
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(embeddedRow)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await run(["issue", "get", ISSUE_ID, "--json", "--no-include-interactions"]);
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      `http://localhost:3100/api/issues/${ISSUE_ID}`,
+    ]);
+    // Find the JSON output line. --json mode prints a single JSON document to stdout.
+    const jsonLine = logSpy.mock.calls.map((c) => c[0]).find((line) => typeof line === "string" && line.startsWith("{"));
+    expect(jsonLine).toBeDefined();
+    const printed = JSON.parse(jsonLine as string);
+    expect(printed.pendingInteractions).toBeUndefined();
+    expect(printed.id).toBe(ISSUE_ID);
+  });
+
+  it("strips server-embedded pendingInteractions in TTY mode when opt-out (P1 fix SPA-4929)", async () => {
+    const embeddedRow = {
+      id: ISSUE_ID,
+      status: "todo",
+      pendingInteractions: [
+        {
+          id: INTERACTION_ID,
+          kind: "request_confirmation",
+          title: "Approve PR",
+          status: "pending",
+          createdAt: "2026-08-22T00:00:00Z",
+          createdByAgentId: null,
+        },
+      ],
+    };
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(embeddedRow)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    // Force interactive TTY default.
+    const originalIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    try {
+      await run(["issue", "get", ISSUE_ID, "--no-include-interactions"]);
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", { value: originalIsTTY, configurable: true });
+    }
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      `http://localhost:3100/api/issues/${ISSUE_ID}`,
+    ]);
+    // The pendingInteraction formatted line must NOT appear when opted out.
+    const printed = logSpy.mock.calls.map((c) => c[0]).join("\n");
+    expect(printed).not.toContain("pendingInteraction id=");
+    // But the embedded field was stripped, not leaked.
+    const jsonLine = logSpy.mock.calls.map((c) => c[0]).find((line) => typeof line === "string" && line.includes(ISSUE_ID) && line.includes("todo"));
+    expect(jsonLine).toBeDefined();
+    const printedRow = JSON.parse(jsonLine as string);
+    expect(printedRow.pendingInteractions).toBeUndefined();
+  });
+
+  it("renders server-embedded pendingInteractions as a human-friendly line in TTY mode (SPA-4929)", async () => {
+    const embeddedRow = {
+      id: ISSUE_ID,
+      status: "todo",
+      pendingInteractions: [
+        {
+          id: INTERACTION_ID,
+          kind: "request_confirmation",
+          title: "Approve PR",
+          status: "pending",
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          createdByAgentId: null,
+        },
+      ],
+    };
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(embeddedRow)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const originalIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    try {
+      await run(["issue", "get", ISSUE_ID]);
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", { value: originalIsTTY, configurable: true });
+    }
+
+    const printed = logSpy.mock.calls.map((c) => c[0]).join("\n");
+    expect(printed).toContain(`pendingInteraction id=${INTERACTION_ID} kind=request_confirmation status=pending`);
+    expect(printed).toContain(`title="Approve PR"`);
+  });
+
+  it("includes server-embedded pendingInteractions in --json output (SPA-4929)", async () => {
+    const embeddedRow = {
+      id: ISSUE_ID,
+      status: "todo",
+      pendingInteractions: [
+        {
+          id: INTERACTION_ID,
+          kind: "request_confirmation",
+          title: "Approve PR",
+          status: "pending",
+          createdAt: "2026-08-22T00:00:00Z",
+          createdByAgentId: null,
+        },
+      ],
+    };
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(embeddedRow)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    // --json defaults to no pendingInteractions for script stability; use --include-interactions.
+    await run(["issue", "get", ISSUE_ID, "--json", "--include-interactions"]);
+
+    const jsonLine = logSpy.mock.calls.map((c) => c[0]).find((line) => typeof line === "string" && line.startsWith("{"));
+    expect(jsonLine).toBeDefined();
+    const printed = JSON.parse(jsonLine as string);
+    expect(printed.pendingInteractions).toEqual([
+      expect.objectContaining({
+        id: INTERACTION_ID,
+        kind: "request_confirmation",
+        status: "pending",
+        title: "Approve PR",
+      }),
+    ]);
+  });
+
+  it("resolves identifier to UUID before fallback /interactions fetch (P1 fix SPA-4929)", async () => {
+    const IDENTIFIER = "PC-4929";
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith(`/interactions`)) {
+        return Promise.resolve(
+          jsonResponse([
+            {
+              id: INTERACTION_ID,
+              kind: "request_confirmation",
+              status: "pending",
+              title: "Approve PR",
+              createdAt: "2026-08-22T00:00:00Z",
+            },
+          ]),
+        );
+      }
+      // First GET returns the resolved issue (with id).
+      return Promise.resolve(jsonResponse({ id: ISSUE_ID, identifier: IDENTIFIER, status: "todo" }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["issue", "get", IDENTIFIER, "--json", "--include-interactions"]);
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      `http://localhost:3100/api/issues/${IDENTIFIER}`,
+      `http://localhost:3100/api/issues/${ISSUE_ID}/interactions`,
+    ]);
+  });
+
+  it("omits pendingInteractions field entirely when server returns empty array and --json (back-compat)", async () => {
+    const embeddedRow = { id: ISSUE_ID, status: "todo", pendingInteractions: [] };
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(embeddedRow)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await run(["issue", "get", ISSUE_ID, "--json"]);
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      `http://localhost:3100/api/issues/${ISSUE_ID}`,
+    ]);
+    const jsonLine = logSpy.mock.calls.map((c) => c[0]).find((line) => typeof line === "string" && line.startsWith("{"));
+    expect(jsonLine).toBeDefined();
+    const printed = JSON.parse(jsonLine as string);
+    // Server returns empty array → CLI must omit the key entirely (back-compat shape).
+    expect(printed.pendingInteractions).toBeUndefined();
+    expect(printed.id).toBe(ISSUE_ID);
+  });
+
   it("wraps comments, approvals, markers, and recovery action endpoints", async () => {
     const fetchMock = vi
       .fn()

@@ -94,6 +94,26 @@ export function validateReceiptRow(row: {
   return { ok: reasons.length === 0, reasons };
 }
 
+// R2 scope discriminator (exported for tests).
+//
+// A "build card" subject to the BUILD MODEL v3 Phase 2 hardening is a leaf
+// whose parent carries a `## Requirements` matrix with `- R<n>: ...` lines.
+// That matrix is what LaQuesha authors when decomposing a hardened plan
+// (see ADR-0058 Decision 5) and is the contract R3/R4/R5 will build on. A
+// card without that scope -- a signoff-policy exercise, a one-off feature
+// card, an ad-hoc operational task -- is OUT OF SCOPE: neither the receipt
+// gate nor the coverage gate should fire, and the review->approval advance
+// must proceed as it did pre-R2.
+//
+// This is the discriminator Argus required at round 2 -- both gates share
+// it, so an unscoped card can never be 422-blocked again (SPA-5506 class
+// stall) while a scoped card is still gated on both receipts and coverage.
+export function isScopedBuildCard(parent: { description?: string | null } | null | undefined): boolean {
+  if (!parent) return false;
+  const reqs = parseRequirements(parent.description ?? null);
+  return reqs !== null && reqs.size > 0;
+}
+
 function isParentWithRequirements(parent: { description?: string | null } | null): boolean {
   if (!parent) return false;
   const reqs = parseRequirements(parent.description ?? null);
@@ -111,7 +131,25 @@ export async function assertReviewToApprovalGates(input: {
     return;
   }
 
-  // Receipt gate
+  // R2 scope: only cards whose parent carries a `## Requirements` matrix
+  // are subject to the receipt + coverage gates. A card without a parent,
+  // or with a parent that has no Requirements section, is OUT OF SCOPE and
+  // advances normally. See `isScopedBuildCard` above for the rationale and
+  // ADR-0058 Decision 5 for the parent-matrix contract.
+  let parent: { id: string; description?: string | null } | null = null;
+  if (input.issue.parentId) {
+    const parentRows = await input.db
+      .select({ id: issues.id, description: issues.description })
+      .from(issues)
+      .where(and(eq(issues.id, input.issue.parentId), eq(issues.companyId, input.companyId)))
+      .limit(1);
+    parent = parentRows[0] ?? null;
+  }
+  if (!isScopedBuildCard(parent)) {
+    return;
+  }
+
+  // Receipt gate -- fires only for scoped build cards.
   const receipt = await getLatestBuildReceiptForIssue({
     db: input.db,
     companyId: input.companyId,
@@ -139,16 +177,11 @@ export async function assertReviewToApprovalGates(input: {
     });
   }
 
-  // Coverage gate -- only when parent carries a Requirements matrix
-  if (!input.issue.parentId) return;
-  const parentRows = await input.db
-    .select({ id: issues.id, description: issues.description })
-    .from(issues)
-    .where(and(eq(issues.id, input.issue.parentId), eq(issues.companyId, input.companyId)))
-    .limit(1);
-  const parent = parentRows[0] ?? null;
+  // Coverage gate -- only when the parent (now known to carry Requirements)
+  // exists. We re-use `isScopedBuildCard` to keep the scope in lock-step
+  // with the receipt gate; this means an unscoped card short-circuits at
+  // the top and never reaches either gate.
   if (!parent) return;
-  if (!isParentWithRequirements(parent)) return;
 
   const siblings = await input.db
     .select({ id: issues.id, identifier: issues.identifier, description: issues.description, status: issues.status })

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { computeCoverage, extractRequirementsSection, parseCovers, parseRequirements } from "../services/coverage-matrix.js";
-import { validateReceiptRow } from "../services/review-approval-gate.js";
+import { isScopedBuildCard, validateReceiptRow } from "../services/review-approval-gate.js";
 
 // Coverage-matrix port -- locks the detector contract R2 depends on.
 
@@ -183,5 +183,115 @@ describe("validateReceiptRow (R2 receipt gate)", () => {
     expect(validateReceiptRow({ ...valid, metadata: { ledger_status: "parsed" } }).ok).toBe(true);
     expect(validateReceiptRow({ ...valid, metadata: { ledger_status: "missing" } }).ok).toBe(true);
     expect(validateReceiptRow({ ...valid }).ok).toBe(true);
+  });
+});
+
+// R2 scope discriminator -- the round-2 Argus verdict (decision 05314bd8)
+// demanded this exact change. Without it, the receipt gate fires on EVERY
+// review->approval advance and breaks signoff-policy (and every other
+// non-build card in the fleet) with 422 receipt_gate_failed.
+//
+// These tests lock the new scope contract:
+//   - no parent at all (signoff-policy.spec.ts shape)           -> UNSCOPED
+//   - parent exists but carries no ## Requirements section     -> UNSCOPED
+//   - parent carries ## Requirements with at least one - R<n>: -> SCOPED
+//
+// `isScopedBuildCard` is the single source of truth for the gate scope;
+// `assertReviewToApprovalGates` short-circuits at the top when it returns
+// false, so an unscoped card advances normally.
+
+describe("isScopedBuildCard (R2 scope discriminator, round 2 fix)", () => {
+  it("returns false when parent is null", () => {
+    expect(isScopedBuildCard(null)).toBe(false);
+    expect(isScopedBuildCard(undefined)).toBe(false);
+  });
+
+  it("returns false when parent has no description", () => {
+    expect(isScopedBuildCard({})).toBe(false);
+    expect(isScopedBuildCard({ description: null })).toBe(false);
+    expect(isScopedBuildCard({ description: undefined })).toBe(false);
+  });
+
+  it("returns false when parent description has no ## Requirements section", () => {
+    expect(isScopedBuildCard({ description: "no requirements here" })).toBe(false);
+    expect(isScopedBuildCard({ description: "## What\n- nothing relevant\n" })).toBe(false);
+  });
+
+  it("returns false when parent has ## Requirements heading but no - R<n>: lines", () => {
+    expect(isScopedBuildCard({ description: "## Requirements\nnothing parseable here\n" })).toBe(false);
+  });
+
+  it("returns true when parent carries the live LaQuesha heading + at least one R-id", () => {
+    const parent = { description: LIVE_PARENT_BODY };
+    expect(isScopedBuildCard(parent)).toBe(true);
+  });
+
+  it("returns true for a minimal ## Requirements block with a single R-id", () => {
+    expect(isScopedBuildCard({ description: "## Requirements\n- R1: build the thing\n" })).toBe(true);
+  });
+});
+
+// Live-probe coverage -- the card's DoD names three concrete cases the
+// PATCH->gate wiring must satisfy. Helper-level exercises of the gate
+// contract; the e2e shard (signoff-policy.spec.ts) exercises the route
+// end-to-end against this same code path.
+//
+// These probe the gate contract at the level of the two helpers that own
+// the decision: the receipt-row validator (already covered above) and the
+// scope discriminator that decides whether the gate fires at all.
+
+describe("R2 live-probe gate contract (round 2)", () => {
+  const receiptValid = {
+    treeSha: "a".repeat(40),
+    remoteVerified: "verified",
+    gates: { met: 1, unmet: 0, abandoned: 0 },
+    exit: "gates-met",
+    branch: "main",
+    heartbeatRunId: "run-1",
+    attemptId: "run-1",
+    generation: 1,
+  } as const;
+
+  // Probe (a) -- a clean build card (parent has Requirements, sibling leaf
+  // covers every R-id) with a valid receipt must satisfy both gates.
+  it("probe (a): clean build card (valid receipt + full coverage) -> both gates ok", () => {
+    const parent = { description: "## Requirements\n- R1: build it\n" };
+    const children = [{ identifier: "L1", description: "Covers: R1", status: "done" }];
+    expect(isScopedBuildCard(parent)).toBe(true);
+    expect(validateReceiptRow(receiptValid).ok).toBe(true);
+    expect(computeCoverage({ parent, children }).ok).toBe(true);
+  });
+
+  // Probe (b) -- a build card with a valid receipt but an uncovered R-id
+  // must fail the coverage gate (this is the case Argus said was unproven).
+  it("probe (b): valid receipt + uncovered R-id -> coverage gate fails", () => {
+    const parent = { description: "## Requirements\n- R1: a\n- R2: b\n" };
+    const children = [{ identifier: "L1", description: "Covers: R1", status: "done" }];
+    expect(isScopedBuildCard(parent)).toBe(true);
+    expect(validateReceiptRow(receiptValid).ok).toBe(true);
+    const cov = computeCoverage({ parent, children });
+    expect(cov.ok).toBe(false);
+    expect(cov.reasons.join(" ")).toMatch(/R2/);
+  });
+
+  // Probe (c) -- a build card with a forged/missing receipt but full
+  // coverage must fail the receipt gate (this is the case the card DoD
+  // names explicitly).
+  it("probe (c): missing receipt + full coverage -> receipt gate fails", () => {
+    const parent = { description: "## Requirements\n- R1: a\n" };
+    const children = [{ identifier: "L1", description: "Covers: R1", status: "done" }];
+    expect(isScopedBuildCard(parent)).toBe(true);
+    expect(validateReceiptRow(null).ok).toBe(false);
+    expect(computeCoverage({ parent, children }).ok).toBe(true);
+  });
+
+  // Probe (d) -- an unscoped card (no parent Requirements) must bypass
+  // both gates. This is the SPA-5176 R2 round-2 fix; without it, every
+  // signoff-policy fixture in the fleet was 422-blocked.
+  it("probe (d): unscoped card (no Requirements matrix) -> both gates skipped", () => {
+    expect(isScopedBuildCard(null)).toBe(false);
+    expect(isScopedBuildCard({ description: "Signoff happy path" })).toBe(false);
+    // No receipt and no parent -> validator is irrelevant because the gate
+    // short-circuits on the scope check before ever loading the receipt.
   });
 });

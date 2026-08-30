@@ -12009,18 +12009,36 @@ export function issueRoutes(
   });
 
   // R4 fencing -- deploy cap 1 on UAT + per-worktree builder fence (ADR-0058/0059 Phase 2).
+  // Fencing is privileged control plane: every mutation goes through the same
+  // agent-issue-mutation gate as POST /issues/:id/comments (round-2 P1). A
+  // company reader who could only assertIssueReadAllowed could otherwise
+  // acquire a fence and lock out the real builder.
   router.post("/issues/:id/deploy-leases", async (req, res) => {
     const id = req.params.id as string;
     const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
     if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     const heartbeatRunId = typeof (req.body as Record<string, unknown>)?.heartbeatRunId === "string"
       ? (req.body as Record<string, unknown>).heartbeatRunId as string
       : null;
     const environment = typeof (req.body as Record<string, unknown>)?.environment === "string"
       ? ((req.body as Record<string, unknown>).environment as string)
       : "uat";
-    const lease = await acquireDeployLease({ db, companyId: issue.companyId, heartbeatRunId, issueId: issue.id, environment });
+    // Round-2 P1: do NOT trust a client-supplied generation default. Caller
+    // must explicitly bump generation via nextGenerationForRetry() when
+    // retrying after a sweep-expired attempt; the server never silently
+    // reuses the dead attempt's identity (codex finding #4).
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const generation = typeof body.generation === "number" && Number.isFinite(body.generation) && body.generation >= 1
+      ? Math.floor(body.generation)
+      : null;
+    if (generation === null) {
+      res.status(422).json({
+        error: "generation is required (positive integer; bump via nextGenerationForRetry on retry)",
+      });
+      return;
+    }
+    const lease = await acquireDeployLease({ db, companyId: issue.companyId, heartbeatRunId, issueId: issue.id, environment, generation });
     res.status(201).json(lease);
   });
 
@@ -12028,7 +12046,7 @@ export function issueRoutes(
     const id = req.params.id as string;
     const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
     if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     await releaseDeployLease({ db, leaseId: req.params.leaseId as string, companyId: issue.companyId });
     res.status(204).send();
   });
@@ -12037,7 +12055,7 @@ export function issueRoutes(
     const id = req.params.id as string;
     const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
     if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     await heartbeatDeployLease({ db, leaseId: req.params.leaseId as string, companyId: issue.companyId });
     res.status(204).send();
   });
@@ -12046,10 +12064,21 @@ export function issueRoutes(
     const id = req.params.id as string;
     const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
     if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
-    const body = req.body as Record<string, unknown>;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
     const worktreePath = typeof body?.worktreePath === "string" ? (body.worktreePath as string) : "";
-    const generation = typeof body?.generation === "number" ? (body.generation as number) : 1;
+    // Round-2 P1: generation is mandatory. The previous default of 1 let a
+    // caller silently reuse the dead attempt's identity (codex #4). Caller
+    // must explicitly bump via nextGenerationForRetry() on retry.
+    const generation = typeof body?.generation === "number" && Number.isFinite(body.generation) && body.generation >= 1
+      ? Math.floor(body.generation)
+      : null;
+    if (generation === null) {
+      res.status(422).json({
+        error: "generation is required (positive integer; bump via nextGenerationForRetry on retry)",
+      });
+      return;
+    }
     const heartbeatRunId = typeof body?.heartbeatRunId === "string" ? (body.heartbeatRunId as string) : null;
     const fence = await acquireBuilderFence({ db, companyId: issue.companyId, worktreePath, generation, heartbeatRunId, issueId: issue.id });
     res.status(201).json(fence);
@@ -12059,7 +12088,7 @@ export function issueRoutes(
     const id = req.params.id as string;
     const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
     if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     await releaseBuilderFence({ db, fenceId: req.params.fenceId as string, companyId: issue.companyId });
     res.status(204).send();
   });
@@ -12068,7 +12097,7 @@ export function issueRoutes(
     const id = req.params.id as string;
     const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
     if (!issue) return;
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     await heartbeatBuilderFence({ db, fenceId: req.params.fenceId as string, companyId: issue.companyId });
     res.status(204).send();
   });

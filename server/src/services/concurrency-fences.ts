@@ -24,6 +24,17 @@ import { builderFences, deployLeases, heartbeatRuns } from "@paperclipai/db";
 import { conflict } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 
+// PG SQLSTATE for unique_violation -- the partial unique index backstop
+// that catches a race the pre-check missed. Treat it as conflict() so the
+// caller gets the same 409 shape as the pre-check path.
+const PG_UNIQUE_VIOLATION = "23505";
+
+function isUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  return code === PG_UNIQUE_VIOLATION;
+}
+
 // How long a fence row is considered alive after its last heartbeat. After
 // this window the sweep reclaims it even if the run row still says running
 // but has stopped heartbeating (the kill-mid-attempt probe: after 90s the
@@ -44,6 +55,7 @@ export async function acquireDeployLease(input: {
   heartbeatRunId?: string | null;
   issueId?: string | null;
   environment?: string;
+  generation?: number;
 }): Promise<typeof deployLeases.$inferSelect> {
   const env = (input.environment ?? "uat").toLowerCase();
   // Check existing active lease in this company+env before inserting. The
@@ -63,20 +75,32 @@ export async function acquireDeployLease(input: {
   if (existing) {
     throw conflict("deploy in progress");
   }
-  const row = await (input.db as Db)
-    .insert(deployLeases)
-    .values({
-      companyId: input.companyId,
-      environment: env,
-      status: "active",
-      heartbeatRunId: input.heartbeatRunId ?? null,
-      issueId: input.issueId ?? null,
-      generation: 1,
-      acquiredAt: new Date(),
-      lastHeartbeatAt: new Date(),
-    })
-    .returning()
-    .then((rows) => rows[0] as typeof deployLeases.$inferSelect);
+  let row: typeof deployLeases.$inferSelect;
+  try {
+    row = await (input.db as Db)
+      .insert(deployLeases)
+      .values({
+        companyId: input.companyId,
+        environment: env,
+        status: "active",
+        heartbeatRunId: input.heartbeatRunId ?? null,
+        issueId: input.issueId ?? null,
+        // caller-supplied generation: the deploy cap is 1 active lease per
+        // (company, environment); generation is informational here. We refuse
+        // the route-level default of 1 inside routes/issues.ts so the caller
+        // owns the bump contract (nextGenerationForRetry).
+        generation: input.generation ?? 1,
+        acquiredAt: new Date(),
+        lastHeartbeatAt: new Date(),
+      })
+      .returning()
+      .then((rows) => rows[0] as typeof deployLeases.$inferSelect);
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      throw conflict("deploy in progress");
+    }
+    throw err;
+  }
   return row;
 }
 
@@ -138,20 +162,30 @@ export async function acquireBuilderFence(input: {
       `builder already active for worktree ${normPath} generation ${input.generation}`,
     );
   }
-  const row = await (input.db as Db)
-    .insert(builderFences)
-    .values({
-      companyId: input.companyId,
-      worktreePath: normPath,
-      generation: input.generation,
-      status: "active",
-      heartbeatRunId: input.heartbeatRunId ?? null,
-      issueId: input.issueId ?? null,
-      acquiredAt: new Date(),
-      lastHeartbeatAt: new Date(),
-    })
-    .returning()
-    .then((rows) => rows[0] as typeof builderFences.$inferSelect);
+  let row: typeof builderFences.$inferSelect;
+  try {
+    row = await (input.db as Db)
+      .insert(builderFences)
+      .values({
+        companyId: input.companyId,
+        worktreePath: normPath,
+        generation: input.generation,
+        status: "active",
+        heartbeatRunId: input.heartbeatRunId ?? null,
+        issueId: input.issueId ?? null,
+        acquiredAt: new Date(),
+        lastHeartbeatAt: new Date(),
+      })
+      .returning()
+      .then((rows) => rows[0] as typeof builderFences.$inferSelect);
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      throw conflict(
+        `builder already active for worktree ${normPath} generation ${input.generation}`,
+      );
+    }
+    throw err;
+  }
   return row;
 }
 
@@ -191,33 +225,28 @@ export async function sweepExpiredFences(db: FenceDb): Promise<{ deployExpired: 
   let deployExpired = 0;
   let builderExpired = 0;
   try {
-    // Collect active deploy leases that are stale or whose run is no longer running.
-    // Two signals: lastHeartbeatAt stale, OR heartbeatRuns.status != 'running'.
+    // Collect active deploy leases that are stale (lastHeartbeatAt < cutoff).
+    // The UPDATE re-applies the same lastHeartbeatAt < cutoff predicate so a
+    // run whose heartbeat lands between this SELECT and the UPDATE cancels
+    // the expiry in-flight (race-free). Without the re-check, the row would
+    // be marked expired while its owner is heartbeating fresh.
     const staleDeployRows = await (db as Db)
       .select({ id: deployLeases.id, heartbeatRunId: deployLeases.heartbeatRunId, lastHeartbeatAt: deployLeases.lastHeartbeatAt })
       .from(deployLeases)
       .where(and(eq(deployLeases.status, "active"), lt(deployLeases.lastHeartbeatAt, cutoff)));
     for (const row of staleDeployRows) {
-      if (row.heartbeatRunId) {
-        const run = await (db as Db)
-          .select({ status: heartbeatRuns.status })
-          .from(heartbeatRuns)
-          .where(eq(heartbeatRuns.id, row.heartbeatRunId))
-          .then((rows) => rows[0] ?? null);
-        const stillRunning = run?.status === "running";
-        // Stale heartbeat + still reported running: treat as dead (kill mid-attempt).
-        // Stale + already terminal: reclaim. Only skip stale rows that are still
-        // actively running and recently heartbeated (but they wouldn't be stale then).
-        if (stillRunning) {
-          // Check if run's lastOutputAt is also stale; if the run is alive but
-          // not heartbeating the fence, it is considered expanded after 60s.
-          // We still reclaim: generation will bump on next acquire.
-        }
-      }
       await (db as Db)
         .update(deployLeases)
         .set({ status: "expired", releasedAt: new Date(), updatedAt: new Date() })
-        .where(eq(deployLeases.id, row.id));
+        // Race guard: only expire if the row is STILL stale. A heartbeat that
+        // landed between SELECT and UPDATE bumps lastHeartbeatAt and this
+        // WHERE no longer matches, so the row is skipped (cancels expiry).
+        .where(
+          and(
+            eq(deployLeases.id, row.id),
+            lt(deployLeases.lastHeartbeatAt, cutoff),
+          ),
+        );
       deployExpired += 1;
     }
     // Also sweep deploy rows whose run is terminal even if not yet stale.
@@ -252,7 +281,14 @@ export async function sweepExpiredFences(db: FenceDb): Promise<{ deployExpired: 
       await (db as Db)
         .update(builderFences)
         .set({ status: "expired", releasedAt: new Date(), updatedAt: new Date() })
-        .where(eq(builderFences.id, row.id));
+        // Same race guard as deploy leases: re-check lastHeartbeatAt < cutoff
+        // so a fresh heartbeat cancels the expiry in-flight.
+        .where(
+          and(
+            eq(builderFences.id, row.id),
+            lt(builderFences.lastHeartbeatAt, cutoff),
+          ),
+        );
       builderExpired += 1;
     }
     const activeBuilderCandidates = await (db as Db)

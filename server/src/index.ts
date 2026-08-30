@@ -940,6 +940,43 @@ export async function startServer(): Promise<StartedServer> {
     heartbeatSchedulerInterval = setInterval(callback, config.heartbeatSchedulerIntervalMs);
     heartbeatSchedulerInterval?.unref?.();
   };
+  // R4 round-2 P2: dedicated fence-sweep ticker, pinned at <=30s.
+  // The generic heartbeat scheduler runs many work items; its interval
+  // (default 30s, floor 10s) can be disabled or stretched via env.
+  // The fence sweep is bounded by the DoD ceiling of 90s for stale-lease
+  // recovery, so a missed or delayed generic tick would break that
+  // contract. A dedicated interval guarantees cadence independent of
+  // the other periodic work.
+  const FENCE_SWEEP_INTERVAL_MS = 30_000;
+  let fenceSweepStopped = false;
+  let fenceSweepInterval: ReturnType<typeof setInterval> | null = null;
+  const fenceSweepInFlight = new Set<Promise<unknown>>();
+  const trackFenceSweepWork = (work: Promise<unknown>) => {
+    let tracked: Promise<void>;
+    tracked = Promise.resolve(work)
+      .then(() => undefined, () => undefined)
+      .finally(() => {
+        fenceSweepInFlight.delete(tracked);
+      });
+    fenceSweepInFlight.add(tracked);
+  };
+  const waitForFenceSweepIdle = async () => {
+    while (fenceSweepInFlight.size > 0) {
+      await Promise.allSettled([...fenceSweepInFlight]);
+    }
+  };
+  const startFenceSweepInterval = () => {
+    fenceSweepInterval = setInterval(() => {
+      if (fenceSweepStopped) return;
+      // @ts-ignore -- dynamic import of fencing service (DB not available at top-level import time)
+      trackFenceSweepWork(import("../services/concurrency-fences.js").then(({ sweepExpiredFences }) => sweepExpiredFences(db as unknown as never)).then((r) => {
+        if (r.deployExpired > 0 || r.builderExpired > 0) logger.info(r, "fence sweep (dedicated ticker) reclaimed expired leases");
+      }).catch((err) => {
+        logger.error({ err }, "fence sweep (dedicated ticker) failed");
+      }));
+    }, FENCE_SWEEP_INTERVAL_MS);
+    fenceSweepInterval?.unref?.();
+  };
   const externalObjects = externalObjectService(db as any, {
     pluginWorkerManager,
     enabled: async () => (await instanceSettingsService(db).getExperimental()).enableExternalObjects === true,
@@ -1151,6 +1188,8 @@ export async function startServer(): Promise<StartedServer> {
     };
     await runRetentionSweep();
 
+    startFenceSweepInterval();
+
     startHeartbeatSchedulerInterval(() => {
       // Track the outer async callback as well as the work it starts. Shutdown
       // can then wait through an already-running suppression check before it
@@ -1256,12 +1295,8 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "periodic tool connection health sweep failed");
           }));
 
-        // @ts-ignore -- dynamic import of fencing service (DB not available at top-level import time)
-        trackHeartbeatSchedulerWork(import("../services/concurrency-fences.js").then(({ sweepExpiredFences }) => sweepExpiredFences(db as unknown as never)).then((r) => {
-          if (r.deployExpired > 0 || r.builderExpired > 0) logger.info(r, "fence sweep reclaimed expired leases");
-        }).catch((err) => {
-          logger.error({ err }, "fence sweep failed");
-        }));
+        // Fence sweep removed from the generic heartbeat scheduler; the
+        // dedicated 30s ticker above owns cadence (round-2 P2).
 
         trackHeartbeatSchedulerWork(secretProposals.sweepExpired()
           .then((expired) => {
@@ -1443,10 +1478,16 @@ export async function startServer(): Promise<StartedServer> {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
       await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
       heartbeatSchedulerStopped = true;
+      fenceSweepStopped = true;
       if (heartbeatSchedulerInterval) {
         clearInterval(heartbeatSchedulerInterval);
         heartbeatSchedulerInterval = null;
       }
+      if (fenceSweepInterval) {
+        clearInterval(fenceSweepInterval);
+        fenceSweepInterval = null;
+      }
+      await waitForFenceSweepIdle();
 
       const heartbeatShutdown = await coordinateHeartbeatSchedulerShutdown({
         signal,

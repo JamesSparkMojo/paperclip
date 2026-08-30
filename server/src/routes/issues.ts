@@ -200,6 +200,7 @@ import {
   redactIssueMonitorExternalRef,
   setIssueExecutionPolicyMonitorScheduledBy,
 } from "../services/issue-execution-policy.js";
+import { assertReviewToApprovalGates } from "../services/review-approval-gate.js";
 import { parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import {
@@ -8755,6 +8756,32 @@ export function issueRoutes(
       reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
       monitorExplicitlyUpdated: req.body.executionPolicy !== undefined && monitorChanged,
     });
+    // R2: server-enforced review -> approval gate (receipt + coverage). This runs
+    // after the transition is computed but before it is applied, so a gate
+    // failure returns 422 and the PATCH never lands. Board overrides do not
+    // bypass this gate.
+    if (transition.decision?.outcome === "approved") {
+      const existingState = parseIssueExecutionState(existing.executionState);
+      const approvedStage = existingState?.currentStageId
+        ? (nextExecutionPolicy?.stages.find((s) => s.id === existingState.currentStageId) ?? null)
+        : null;
+      const nextStage = transition.patch.executionState
+        ? (() => {
+            const nextState = transition.patch.executionState as Record<string, unknown>;
+            const nextId = nextState["currentStageId"] as string | null | undefined;
+            return nextExecutionPolicy?.stages.find((s) => s.id === nextId) ?? null;
+          })()
+        : null;
+      if (approvedStage?.type === "review" && nextStage?.type === "approval") {
+        await assertReviewToApprovalGates({
+          db,
+          companyId: existing.companyId,
+          issue: { id: existing.id, parentId: existing.parentId },
+          activeStageType: approvedStage.type,
+          nextStageType: nextStage.type,
+        });
+      }
+    }
     const decisionId = transition.decision ? randomUUID() : null;
     if (decisionId) {
       const nextExecutionState = transition.patch.executionState;
@@ -11222,6 +11249,29 @@ export function issueRoutes(
         },
         commentBody: req.body.body,
       });
+      // R2: gate applies to review -> approval advances triggered by ```review: approved``` comment
+      if (transition.decision?.outcome === "approved") {
+        const existingState = parseIssueExecutionState(currentIssue.executionState);
+        const approvedStage = existingState?.currentStageId
+          ? (currentExecutionPolicy?.stages.find((s) => s.id === existingState.currentStageId) ?? null)
+          : null;
+        const nextStage = transition.patch.executionState
+          ? (() => {
+              const nextState = transition.patch.executionState as Record<string, unknown>;
+              const nextId = nextState["currentStageId"] as string | null | undefined;
+              return currentExecutionPolicy?.stages.find((s) => s.id === nextId) ?? null;
+            })()
+          : null;
+        if (approvedStage?.type === "review" && nextStage?.type === "approval") {
+          await assertReviewToApprovalGates({
+            db,
+            companyId: currentIssue.companyId,
+            issue: { id: currentIssue.id, parentId: currentIssue.parentId },
+            activeStageType: approvedStage.type,
+            nextStageType: nextStage.type,
+          });
+        }
+      }
       const decisionId = transition.decision ? randomUUID() : null;
       if (decisionId) {
         const nextExecutionState = transition.patch.executionState;

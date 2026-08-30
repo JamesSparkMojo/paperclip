@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { parseUnlazyLedger } from "../services/build-receipts.js";
 
+// Locked contracts for the server-side BUILD-RECEIPT emitter.
+//
 // The emitter's git helper is module-private. To exercise it without spinning
 // up the full embedded-postgres harness, we re-implement the same exec
 // contract here and assert the behavior we depend on: a 40-lowercase-hex SHA
@@ -59,5 +62,55 @@ describe("runGitHead contract (build-receipts R1)", () => {
     const result = spawnSync("git", ["-C", repoDir!, "rev-parse", "HEAD"], { encoding: "utf8" });
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe(result.stdout.trim().toLowerCase());
+  });
+});
+
+// Locks the GATES.md parser contract. The server parses the ledger file the
+// builder names in resultJson.ledger_path; the parser is the ~40-line port of
+// gate-check.mjs --status mode described on interaction 1793b3c1. These tests
+// cover the four states a gate row can be in (met, pending, unmet,
+// abandoned) and confirm the strict-format gating (EVIDENCE: required for met;
+// PENDING: required for pending; ABANDON: as a top-level line).
+describe("parseUnlazyLedger contract (build-receipts R1)", () => {
+  it("counts a ticked EVIDENCE row as met", () => {
+    const text = [
+      "- [x] spec-found EVIDENCE: skill/AGENTS.md L42-88",
+      "- [ ] build-evidence EVIDENCE: <none>",
+    ].join("\n");
+    expect(parseUnlazyLedger(text)).toEqual({ met: 1, unmet: 1, abandoned: 0 });
+  });
+
+  it("counts a PENDING row as unmet (not abandoned)", () => {
+    const text = "- [ ] spec-found PENDING: blocked on upstream\n";
+    expect(parseUnlazyLedger(text)).toEqual({ met: 0, unmet: 1, abandoned: 0 });
+  });
+
+  it("counts a top-level ABANDON: line as abandoned", () => {
+    const text = [
+      "- [x] spec-found EVIDENCE: ok",
+      "ABANDON: build-evidence reason=superseded by R2",
+    ].join("\n");
+    expect(parseUnlazyLedger(text)).toEqual({ met: 1, unmet: 0, abandoned: 1 });
+  });
+
+  it("ignores comment lines and blank lines", () => {
+    const text = [
+      "",
+      "# header",
+      "- [x] g1 EVIDENCE: x",
+      "",
+      "ABANDON: g2 reason=z",
+    ].join("\n");
+    expect(parseUnlazyLedger(text)).toEqual({ met: 1, unmet: 0, abandoned: 1 });
+  });
+
+  it("treats [X] (uppercase) as met when EVIDENCE: is present", () => {
+    const text = "- [X] g1 EVIDENCE: x\n";
+    expect(parseUnlazyLedger(text)).toEqual({ met: 1, unmet: 0, abandoned: 0 });
+  });
+
+  it("counts a ticked row without EVIDENCE: as unmet", () => {
+    const text = "- [x] g1 nonsense\n";
+    expect(parseUnlazyLedger(text)).toEqual({ met: 0, unmet: 1, abandoned: 0 });
   });
 });

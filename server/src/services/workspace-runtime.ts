@@ -3272,21 +3272,21 @@ function deriveWorktreeProvisionLockKey(repoRoot: string): string {
   return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
 
-async function removeStaleWorktreeProvisionLock(lockDir: string, staleMs: number): Promise<boolean> {
+async function removeStaleWorktreeProvisionLock(lockFile: string, staleMs: number): Promise<boolean> {
   let shouldRemove = false;
   try {
-    const ownerRaw = await fs.readFile(path.join(lockDir, "owner.json"), "utf8");
+    const ownerRaw = await fs.readFile(lockFile, "utf8");
     const owner = JSON.parse(ownerRaw) as { pid?: unknown; createdAt?: unknown };
     const pid = typeof owner.pid === "number" ? owner.pid : 0;
     const createdAt = typeof owner.createdAt === "string" ? Date.parse(owner.createdAt) : Number.NaN;
     const ageMs = Number.isFinite(createdAt) ? Date.now() - createdAt : staleMs + 1;
     shouldRemove = !isProcessAlive(pid) || ageMs > staleMs;
   } catch {
-    const stat = await fs.stat(lockDir).catch(() => null);
+    const stat = await fs.stat(lockFile).catch(() => null);
     shouldRemove = !stat || Date.now() - stat.mtimeMs > staleMs;
   }
   if (!shouldRemove) return false;
-  await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+  await fs.rm(lockFile, { force: true }).catch(() => undefined);
   return true;
 }
 
@@ -3312,33 +3312,29 @@ export async function withWorktreeProvisionLock<T>(
 ): Promise<T> {
   const baseDir = resolveWorktreeProvisionLockDir(options.lockDir);
   const key = deriveWorktreeProvisionLockKey(repoRoot);
-  const lockDir = path.join(baseDir, `worktree-${key}.lock`);
+  const lockFile = path.join(baseDir, `worktree-${key}.lock`);
   const timeoutMs = options.timeoutMs ?? WORKTREE_PROVISION_LOCK_DEFAULT_TIMEOUT_MS;
   const staleMs = options.staleMs ?? WORKTREE_PROVISION_LOCK_DEFAULT_STALE_MS;
   const deadline = Date.now() + timeoutMs;
+  const ownerPayload = `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`;
 
   await fs.mkdir(baseDir, { recursive: true });
 
-  while (true) {
+  let acquired = false;
+  while (!acquired) {
     try {
-      await fs.mkdir(lockDir);
-      try {
-        await fs.writeFile(
-          path.join(lockDir, "owner.json"),
-          `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`,
-          "utf8",
-        );
-      } catch (error) {
-        await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
-        throw error;
-      }
-      break;
+      // Atomic exclusive create — either the file is ours in one syscall and we
+      // hold the lock, or the file already exists and we wait. Avoids the
+      // mkdir-then-writeFile race where a contending release deletes the dir
+      // between our two syscalls.
+      await fs.writeFile(lockFile, ownerPayload, { flag: "wx" });
+      acquired = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (await removeStaleWorktreeProvisionLock(lockDir, staleMs)) continue;
+      if (await removeStaleWorktreeProvisionLock(lockFile, staleMs)) continue;
       if (Date.now() >= deadline) {
         throw new Error(
-          `Timed out waiting for worktree provision lock at ${lockDir} (timeout ${timeoutMs}ms)`,
+          `Timed out waiting for worktree provision lock at ${lockFile} (timeout ${timeoutMs}ms)`,
         );
       }
       await delay(25);
@@ -3348,7 +3344,7 @@ export async function withWorktreeProvisionLock<T>(
   try {
     return await operation();
   } finally {
-    await fs.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+    await fs.rm(lockFile, { force: true }).catch(() => undefined);
   }
 }
 

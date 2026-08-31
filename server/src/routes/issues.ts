@@ -12028,7 +12028,7 @@ export function issueRoutes(
 
     const meta = (receipt.metadata ?? {}) as Record<string, unknown>;
     res.json({
-      v: 2,
+      v: 3,
       card: receipt.card,
       issue_id: receipt.issueId,
       run_id: receipt.heartbeatRunId,
@@ -12044,6 +12044,15 @@ export function issueRoutes(
       ledger_path: typeof meta["ledger_path"] === "string" ? meta["ledger_path"] : null,
       ledger_status: typeof meta["ledger_status"] === "string" ? meta["ledger_status"] : null,
       exit: receipt.exit,
+      // R3 surface: the four columns the detector re-derives and verifies.
+      // emitted_at is bound into the canonical payload, so a server-side
+      // pass can prove the receipt under audit matches what the server
+      // signed (transcript hash + signature + key id together).
+      emitted_at: receipt.emittedAt.toISOString(),
+      signing_alg: receipt.signingAlg ?? null,
+      signing_key_id: receipt.signingKeyId ?? null,
+      signature: receipt.signature ?? null,
+      transcript_sha256: receipt.transcriptSha256 ?? null,
     });
   });
 

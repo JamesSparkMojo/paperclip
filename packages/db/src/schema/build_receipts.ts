@@ -69,6 +69,22 @@ export const buildReceipts = pgTable(
     // Free-form structured metadata: which build skill (sm-build-paperclip,
     // ad-hoc), the executor's commit-context, etc. Read-only.
     metadata: jsonb("metadata").$type<Record<string, unknown>>().default({} as Record<string, unknown>),
+    // ---- SPA-5177 R3: tamper-evident (signed) receipts -------------------
+    // emitted_at is the wall-clock moment the server signed the row. Bound
+    // into the canonical payload so the signature covers the moment itself.
+    emittedAt: timestamp("emitted_at", { withTimezone: true }).notNull(),
+    // "ed25519" today; future key rotations bump this. The detector refuses
+    // algorithms it does not recognize.
+    signingAlg: text("signing_alg"),
+    // First 8 hex chars of sha256(publicKeyDer) -- identifies which key
+    // signed the row when more than one is in flight (rotation).
+    signingKeyId: text("signing_key_id"),
+    // base64url Ed25519 signature over the canonical payload.
+    signature: text("signature"),
+    // sha256 hex over the same canonical payload (concatenated as a stable
+    // JSON string). Lets the detector prove the receipt it sees matches the
+    // receipt the server says it emitted without re-deriving the form.
+    transcriptSha256: text("transcript_sha256"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -87,6 +103,11 @@ export const buildReceipts = pgTable(
     companyRunIdx: index("build_receipts_company_run_idx").on(
       table.companyId,
       table.heartbeatRunId,
+    ),
+    companyKeyCreatedIdx: index("build_receipts_company_key_created_idx").on(
+      table.companyId,
+      table.signingKeyId,
+      table.createdAt.desc(),
     ),
   }),
 );

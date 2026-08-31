@@ -14,12 +14,16 @@
 //
 // What R1 deliberately does NOT do:
 //   * it does not modify reviewer-obedience gates (R2),
-//   * it does not sign the receipt (R3),
 //   * it does not fence concurrent attempts (R4),
 //   * it does not author adversarial fixtures (R5).
 //
-// If any of those are required, route to the matching card -- this file's
-// scope is the emitter and the read endpoint.
+// R3 (this file's current scope) DOES sign the receipt it emits: every
+// row carries a base64url Ed25519 signature, the algorithm name, a key id,
+// and a transcript hash. The signing key is held in process memory and
+// never leaves the server boundary. The detector (build-receipt-check.mjs)
+// re-derives the canonical payload from the row's signed fields, computes
+// the transcript hash, and verifies the signature; an unsigned or tampered
+// receipt REJECTs.
 
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -33,6 +37,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
+import { signBuildReceipt } from "./build-receipt-signing.js";
 
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type BuildReceiptInsert = typeof buildReceipts.$inferInsert;
@@ -310,6 +315,24 @@ export async function emitBuildReceiptForRun(input: {
   const remoteVerified = await verifyRemoteHasCommit(cwd, treeSha);
   const ledger = parseLedgerForIssue(cwd, readLedgerPathFromResult(run), card);
 
+  // R3: sign the canonical payload before persisting. The signing key is
+  // process-local; the signature, key id, algorithm, and transcript hash are
+  // the four columns the detector re-derives and verifies. emittedAt is
+  // bound into the canonical payload, so the receipt is bound to the
+  // wall-clock moment the server signed it -- not the run's finishedAt.
+  const emittedAt = new Date();
+  const signed = signBuildReceipt({
+    fields: {
+      issueId,
+      attemptId: run.id,
+      runId: run.id,
+      generation: 1,
+      treeSha,
+      gateCounts: ledger.counts,
+      emittedAt,
+    },
+  });
+
   const values: BuildReceiptInsert = {
     companyId: run.companyId,
     issueId,
@@ -333,6 +356,11 @@ export async function emitBuildReceiptForRun(input: {
       ledger_status: ledger.status,
       ledger_path: ledger.path,
     },
+    emittedAt,
+    signingAlg: signed.alg,
+    signingKeyId: signed.keyId,
+    signature: signed.signature,
+    transcriptSha256: signed.transcriptSha256,
   };
 
   // ON CONFLICT DO NOTHING -- a retry of the same run id (after a recovery
@@ -367,8 +395,10 @@ export async function emitBuildReceiptForRun(input: {
       remoteVerified,
       ledgerStatus: ledger.status,
       gates: ledger.counts,
+      signingKeyId: signed.keyId,
+      signatureShort: signed.signature.slice(0, 12),
     },
-    "build-receipts: emitted server-side BUILD-RECEIPT row",
+    "build-receipts: emitted server-side BUILD-RECEIPT row (signed)",
   );
   return { emitted: true, receipt: inserted, reason: "ok" };
 }

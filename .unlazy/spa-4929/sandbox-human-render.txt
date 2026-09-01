@@ -1,0 +1,18 @@
+{
+  "id": "5455a04c-f4e7-4ab6-88b9-b3448448cbd4",
+  "identifier": "SPA-4929",
+  "title": "SPA-4885/BUILD: surface pending interactions",
+  "status": "todo",
+  "priority": "low",
+  "pendingInteractions": [
+    {
+      "id": "f71b6e33-9baf-4cb8-9ba5-929523f71f43",
+      "kind": "request_confirmation",
+      "title": null,
+      "status": "pending",
+      "createdAt": "2026-08-31T10:24:50.774Z",
+      "createdByAgentId": "55ea2812-f43f-4dee-bb5c-aaaf822ae042"
+    }
+  ]
+}
+  pendingInteraction id=f71b6e33-9baf-4cb8-9ba5-929523f71f43 kind=request_confirmation status=pending age=1m

@@ -172,6 +172,7 @@ import {
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
+import { getLatestBuildReceiptForIssue } from "../services/build-receipts.js";
 import { decisionTrainingService } from "../services/decision-training.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -11997,6 +11998,53 @@ export function issueRoutes(
     });
 
     res.json({ ok: true });
+  });
+
+  // ADR-0058 Decision 5 Phase 2 R1 surface: the build-receipt reader.
+  // The detector (build-receipt-check.mjs) calls this instead of parsing a
+  // comment. Schema bumped to v=2 (server-emitted) per James's ruling on
+  // interaction 1793b3c1: the detector branches on `v` (1 = legacy self-posted
+  // comment, 2 = server-emitted row). v=2 carries ledger_status in metadata
+  // because the source of truth for gate counts is the ledger file the
+  // server parses -- not a builder-reported number.
+  router.get("/issues/:id/build-receipts/latest", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+
+    const receipt = await getLatestBuildReceiptForIssue({
+      db,
+      companyId: issue.companyId,
+      issueId: issue.id,
+    });
+    if (!receipt) {
+      res.status(404).json({
+        error: "no build receipt",
+        message: `no build_receipts row exists for issue ${issue.id}`,
+      });
+      return;
+    }
+
+    const meta = (receipt.metadata ?? {}) as Record<string, unknown>;
+    res.json({
+      v: 2,
+      card: receipt.card,
+      issue_id: receipt.issueId,
+      run_id: receipt.heartbeatRunId,
+      attempt_id: receipt.attemptId,
+      generation: receipt.generation,
+      skill: typeof meta["contextSnapshotSkill"] === "string" ? meta["contextSnapshotSkill"] : null,
+      started_at: receipt.startedAt.toISOString(),
+      finished_at: receipt.finishedAt.toISOString(),
+      tree_sha: receipt.treeSha,
+      branch: receipt.branch,
+      remote_verified: receipt.remoteVerified,
+      gates: receipt.gates,
+      ledger_path: typeof meta["ledger_path"] === "string" ? meta["ledger_path"] : null,
+      ledger_status: typeof meta["ledger_status"] === "string" ? meta["ledger_status"] : null,
+      exit: receipt.exit,
+    });
   });
 
   return router;

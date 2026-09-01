@@ -127,6 +127,7 @@ import {
   isThrottleCandidateIssueRewake,
 } from "./issue-rewake-throttle.js";
 import { logActivity, publishPluginDomainEvent, type LogActivityInput } from "./activity-log.js";
+import { emitBuildReceiptForRun } from "./build-receipts.js";
 import {
   buildWorkspaceReadyComment,
   buildWorkspaceReadyMetadata,
@@ -8816,6 +8817,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         payload: buildHeartbeatRunStatusLiveEventPayload(updated),
       });
       publishRunLifecyclePluginEvent(updated);
+      // ADR-0058 Decision 5 Phase 2 R1: server-emitted BUILD-RECEIPT row.
+      // Fire-and-forget -- never blocks the status write. The emitter is
+      // fail-open: a missing workspace or non-git cwd logs and returns
+      // { emitted: false } without raising.
+      if (updated.status === "succeeded") {
+        emitBuildReceiptForRun({ db, run: updated }).catch((err) => {
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err), runId: updated.id },
+            "build-receipts: emit threw -- swallowing (fail-open)",
+          );
+        });
+      }
     }
 
     return updated;
@@ -8843,6 +8856,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         payload: buildHeartbeatRunStatusLiveEventPayload(updated),
       });
       publishRunLifecyclePluginEvent(updated);
+      // ADR-0058 Decision 5 Phase 2 R1: also emit when canonical success
+      // finalization flows through setRunStatusIfRunning (the normal adaptor
+      // finalizer path at ~15767). Mirrors the setRunStatus branch above.
+      if (updated.status === "succeeded") {
+        emitBuildReceiptForRun({ db, run: updated }).catch((err) => {
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err), runId: updated.id },
+            "build-receipts: emit threw -- swallowing (fail-open)",
+          );
+        });
+      }
       return { run: updated, updated: true as const };
     }
 

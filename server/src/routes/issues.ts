@@ -172,6 +172,15 @@ import {
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
+import { getLatestBuildReceiptForIssue } from "../services/build-receipts.js";
+import {
+  acquireBuilderFence,
+  acquireDeployLease,
+  heartbeatBuilderFence,
+  heartbeatDeployLease,
+  releaseBuilderFence,
+  releaseDeployLease,
+} from "../services/concurrency-fences.js";
 import { decisionTrainingService } from "../services/decision-training.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -11997,6 +12006,147 @@ export function issueRoutes(
     });
 
     res.json({ ok: true });
+  });
+
+  // R4 fencing -- deploy cap 1 on UAT + per-worktree builder fence (ADR-0058/0059 Phase 2).
+  // Fencing is privileged control plane: every mutation goes through the same
+  // agent-issue-mutation gate as POST /issues/:id/comments (round-2 P1). A
+  // company reader who could only assertIssueReadAllowed could otherwise
+  // acquire a fence and lock out the real builder.
+  router.post("/issues/:id/deploy-leases", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    const heartbeatRunId = typeof (req.body as Record<string, unknown>)?.heartbeatRunId === "string"
+      ? (req.body as Record<string, unknown>).heartbeatRunId as string
+      : null;
+    const environment = typeof (req.body as Record<string, unknown>)?.environment === "string"
+      ? ((req.body as Record<string, unknown>).environment as string)
+      : "uat";
+    // Round-2 P1: do NOT trust a client-supplied generation default. Caller
+    // must explicitly bump generation via nextGenerationForRetry() when
+    // retrying after a sweep-expired attempt; the server never silently
+    // reuses the dead attempt's identity (codex finding #4).
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const generation = typeof body.generation === "number" && Number.isFinite(body.generation) && body.generation >= 1
+      ? Math.floor(body.generation)
+      : null;
+    if (generation === null) {
+      res.status(422).json({
+        error: "generation is required (positive integer; bump via nextGenerationForRetry on retry)",
+      });
+      return;
+    }
+    const lease = await acquireDeployLease({ db, companyId: issue.companyId, heartbeatRunId, issueId: issue.id, environment, generation });
+    res.status(201).json(lease);
+  });
+
+  router.delete("/issues/:id/deploy-leases/:leaseId", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    await releaseDeployLease({ db, leaseId: req.params.leaseId as string, companyId: issue.companyId });
+    res.status(204).send();
+  });
+
+  router.post("/issues/:id/deploy-leases/:leaseId/heartbeat", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    await heartbeatDeployLease({ db, leaseId: req.params.leaseId as string, companyId: issue.companyId });
+    res.status(204).send();
+  });
+
+  router.post("/issues/:id/builder-fences", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const worktreePath = typeof body?.worktreePath === "string" ? (body.worktreePath as string) : "";
+    // Round-2 P1: generation is mandatory. The previous default of 1 let a
+    // caller silently reuse the dead attempt's identity (codex #4). Caller
+    // must explicitly bump via nextGenerationForRetry() on retry.
+    const generation = typeof body?.generation === "number" && Number.isFinite(body.generation) && body.generation >= 1
+      ? Math.floor(body.generation)
+      : null;
+    if (generation === null) {
+      res.status(422).json({
+        error: "generation is required (positive integer; bump via nextGenerationForRetry on retry)",
+      });
+      return;
+    }
+    const heartbeatRunId = typeof body?.heartbeatRunId === "string" ? (body.heartbeatRunId as string) : null;
+    const fence = await acquireBuilderFence({ db, companyId: issue.companyId, worktreePath, generation, heartbeatRunId, issueId: issue.id });
+    res.status(201).json(fence);
+  });
+
+  router.delete("/issues/:id/builder-fences/:fenceId", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    await releaseBuilderFence({ db, fenceId: req.params.fenceId as string, companyId: issue.companyId });
+    res.status(204).send();
+  });
+
+  router.post("/issues/:id/builder-fences/:fenceId/heartbeat", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    await heartbeatBuilderFence({ db, fenceId: req.params.fenceId as string, companyId: issue.companyId });
+    res.status(204).send();
+  });
+
+  // ADR-0058 Decision 5 Phase 2 R1 surface: the build-receipt reader.
+  // The detector (build-receipt-check.mjs) calls this instead of parsing a
+  // comment. Schema bumped to v=2 (server-emitted) per James's ruling on
+  // interaction 1793b3c1: the detector branches on `v` (1 = legacy self-posted
+  // comment, 2 = server-emitted row). v=2 carries ledger_status in metadata
+  // because the source of truth for gate counts is the ledger file the
+  // server parses -- not a builder-reported number.
+  router.get("/issues/:id/build-receipts/latest", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+
+    const receipt = await getLatestBuildReceiptForIssue({
+      db,
+      companyId: issue.companyId,
+      issueId: issue.id,
+    });
+    if (!receipt) {
+      res.status(404).json({
+        error: "no build receipt",
+        message: `no build_receipts row exists for issue ${issue.id}`,
+      });
+      return;
+    }
+
+    const meta = (receipt.metadata ?? {}) as Record<string, unknown>;
+    res.json({
+      v: 2,
+      card: receipt.card,
+      issue_id: receipt.issueId,
+      run_id: receipt.heartbeatRunId,
+      attempt_id: receipt.attemptId,
+      generation: receipt.generation,
+      skill: typeof meta["contextSnapshotSkill"] === "string" ? meta["contextSnapshotSkill"] : null,
+      started_at: receipt.startedAt.toISOString(),
+      finished_at: receipt.finishedAt.toISOString(),
+      tree_sha: receipt.treeSha,
+      branch: receipt.branch,
+      remote_verified: receipt.remoteVerified,
+      gates: receipt.gates,
+      ledger_path: typeof meta["ledger_path"] === "string" ? meta["ledger_path"] : null,
+      ledger_status: typeof meta["ledger_status"] === "string" ? meta["ledger_status"] : null,
+      exit: receipt.exit,
+    });
   });
 
   return router;

@@ -172,6 +172,7 @@ import {
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
+import { getLatestBuildReceiptForIssue } from "../services/build-receipts.js";
 import { decisionTrainingService } from "../services/decision-training.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -199,6 +200,7 @@ import {
   redactIssueMonitorExternalRef,
   setIssueExecutionPolicyMonitorScheduledBy,
 } from "../services/issue-execution-policy.js";
+import { assertReviewToApprovalGates } from "../services/review-approval-gate.js";
 import { parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import {
@@ -8754,6 +8756,32 @@ export function issueRoutes(
       reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
       monitorExplicitlyUpdated: req.body.executionPolicy !== undefined && monitorChanged,
     });
+    // R2: server-enforced review -> approval gate (receipt + coverage). This runs
+    // after the transition is computed but before it is applied, so a gate
+    // failure returns 422 and the PATCH never lands. Board overrides do not
+    // bypass this gate.
+    if (transition.decision?.outcome === "approved") {
+      const existingState = parseIssueExecutionState(existing.executionState);
+      const approvedStage = existingState?.currentStageId
+        ? (nextExecutionPolicy?.stages.find((s) => s.id === existingState.currentStageId) ?? null)
+        : null;
+      const nextStage = transition.patch.executionState
+        ? (() => {
+            const nextState = transition.patch.executionState as Record<string, unknown>;
+            const nextId = nextState["currentStageId"] as string | null | undefined;
+            return nextExecutionPolicy?.stages.find((s) => s.id === nextId) ?? null;
+          })()
+        : null;
+      if (approvedStage?.type === "review" && nextStage?.type === "approval") {
+        await assertReviewToApprovalGates({
+          db,
+          companyId: existing.companyId,
+          issue: { id: existing.id, parentId: existing.parentId },
+          activeStageType: approvedStage.type,
+          nextStageType: nextStage.type,
+        });
+      }
+    }
     const decisionId = transition.decision ? randomUUID() : null;
     if (decisionId) {
       const nextExecutionState = transition.patch.executionState;
@@ -11221,6 +11249,29 @@ export function issueRoutes(
         },
         commentBody: req.body.body,
       });
+      // R2: gate applies to review -> approval advances triggered by ```review: approved``` comment
+      if (transition.decision?.outcome === "approved") {
+        const existingState = parseIssueExecutionState(currentIssue.executionState);
+        const approvedStage = existingState?.currentStageId
+          ? (currentExecutionPolicy?.stages.find((s) => s.id === existingState.currentStageId) ?? null)
+          : null;
+        const nextStage = transition.patch.executionState
+          ? (() => {
+              const nextState = transition.patch.executionState as Record<string, unknown>;
+              const nextId = nextState["currentStageId"] as string | null | undefined;
+              return currentExecutionPolicy?.stages.find((s) => s.id === nextId) ?? null;
+            })()
+          : null;
+        if (approvedStage?.type === "review" && nextStage?.type === "approval") {
+          await assertReviewToApprovalGates({
+            db,
+            companyId: currentIssue.companyId,
+            issue: { id: currentIssue.id, parentId: currentIssue.parentId },
+            activeStageType: approvedStage.type,
+            nextStageType: nextStage.type,
+          });
+        }
+      }
       const decisionId = transition.decision ? randomUUID() : null;
       if (decisionId) {
         const nextExecutionState = transition.patch.executionState;
@@ -11997,6 +12048,53 @@ export function issueRoutes(
     });
 
     res.json({ ok: true });
+  });
+
+  // ADR-0058 Decision 5 Phase 2 R1 surface: the build-receipt reader.
+  // The detector (build-receipt-check.mjs) calls this instead of parsing a
+  // comment. Schema bumped to v=2 (server-emitted) per James's ruling on
+  // interaction 1793b3c1: the detector branches on `v` (1 = legacy self-posted
+  // comment, 2 = server-emitted row). v=2 carries ledger_status in metadata
+  // because the source of truth for gate counts is the ledger file the
+  // server parses -- not a builder-reported number.
+  router.get("/issues/:id/build-receipts/latest", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+
+    const receipt = await getLatestBuildReceiptForIssue({
+      db,
+      companyId: issue.companyId,
+      issueId: issue.id,
+    });
+    if (!receipt) {
+      res.status(404).json({
+        error: "no build receipt",
+        message: `no build_receipts row exists for issue ${issue.id}`,
+      });
+      return;
+    }
+
+    const meta = (receipt.metadata ?? {}) as Record<string, unknown>;
+    res.json({
+      v: 2,
+      card: receipt.card,
+      issue_id: receipt.issueId,
+      run_id: receipt.heartbeatRunId,
+      attempt_id: receipt.attemptId,
+      generation: receipt.generation,
+      skill: typeof meta["contextSnapshotSkill"] === "string" ? meta["contextSnapshotSkill"] : null,
+      started_at: receipt.startedAt.toISOString(),
+      finished_at: receipt.finishedAt.toISOString(),
+      tree_sha: receipt.treeSha,
+      branch: receipt.branch,
+      remote_verified: receipt.remoteVerified,
+      gates: receipt.gates,
+      ledger_path: typeof meta["ledger_path"] === "string" ? meta["ledger_path"] : null,
+      ledger_status: typeof meta["ledger_status"] === "string" ? meta["ledger_status"] : null,
+      exit: receipt.exit,
+    });
   });
 
   return router;

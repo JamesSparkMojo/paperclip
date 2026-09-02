@@ -1,7 +1,9 @@
 -- SPA-5918 / SPA-5838: partial unique index on open issues.execution_workspace_id (R2)
 --
--- paperclip:migration-safety-ignore large-create-index-not-concurrently
--- Drizzle migrations run transactionally; CONCURRENTLY is unavailable. A one-time build lock is the lesser cost vs silent allocator regressions (SPA-5693 had to null 172 poisoned cards by hand).
+-- File number 0231 (was 0210 in the integration branch — 0212 renumber collided with upstream v2026.831.0's 0212_onboarding_first_task_unique.sql; 0231 sits after upstream 831 max 0230, so upgrade will not collide).
+-- Journal when: 1786259180528 — strictly AFTER upstream 0211 (when=1786129601533) and strictly BEFORE upstream 0212 (when=1786388759523). Window makes this apply now on 817 and shadow nothing on 831 upgrade (journal entry already applied; upstream 0212..0230 still apply on top). Codex review P1 fix: 0231 avoids the 0212 duplicate-number gate that would block 831.
+--
+-- paperclip:migration-safety-ignore large-create-index-not-concurrently: Drizzle migrations run transactionally; CONCURRENTLY is unavailable. A one-time build lock is the lesser cost vs silent allocator regressions (SPA-5693 had to null 172 poisoned cards by hand).
 --
 -- Idempotent: CREATE UNIQUE INDEX IF NOT EXISTS. The index already exists on the live DB from the rolled-back deploy (rows 212/213 in drizzle.__drizzle_migrations recreated it then the code rollback left the index in place). On a fresh DB this creates it; on a DB that already carries it, this is a no-op.
 --
@@ -9,7 +11,4 @@
 --
 -- Forward: as below.
 -- Rollback (out-of-band): DROP INDEX IF EXISTS issues_execution_workspace_id_open_uniq; — no data loss.
---
--- File number 0212 (was 0210 in the integration branch — renumbered to avoid colliding with upstream v2026.817.0's 0210_heartbeat_context_taskkey_index, which already lives at journal idx 210 on the live DB).
--- Journal when: 1786259180528 — strictly AFTER upstream 0211 (when=1786129601533) and strictly BEFORE upstream 0212 (when=1786388759523). That window makes this apply now on 817 (the row 210 already-applied here was created by the failed deploy with when=1788217356874, ABOVE upstream's window, which traps future 831 upgrades) and shadow nothing on a later 831 upgrade (the journal entry will already be applied; the upstream 0212 through 0230 will still apply on top).
 CREATE UNIQUE INDEX IF NOT EXISTS "issues_execution_workspace_id_open_uniq" ON "issues" USING btree ("execution_workspace_id") WHERE "execution_workspace_id" IS NOT NULL AND "status" NOT IN ('done', 'cancelled');

@@ -227,7 +227,7 @@ async function waitForContainmentSideEffects(input: {
       source?.status === "blocked" &&
       source.executionRunId === null &&
       source.checkoutRunId === null &&
-      sameWorkspaceSibling?.status === "in_progress" &&
+      sameWorkspaceSibling?.status === "done" &&
       sameWorkspaceSibling.executionRunId === null &&
       sameWorkspaceSibling.checkoutRunId === null &&
       otherWorkspaceSibling?.status === "in_progress" &&
@@ -498,8 +498,12 @@ async function seedBranchContainmentRun(
       companyId,
       projectId,
       projectWorkspaceId,
-      title: "Sibling issue",
-      status: "in_progress",
+      title: "Same-workspace sibling",
+      // SPA-5926: done so the workspace binding is excluded from the partial index
+      // (WHERE status NOT IN ('done', 'cancelled')) — keeps the "corrupted" shared-workspace
+      // state (same execution_workspace_id as source) without violating
+      // issues_execution_workspace_id_open_uniq. The sibling still holds the workspace binding.
+      status: "done",
       workMode: "standard",
       priority: "medium",
       assigneeAgentId: agentId,
@@ -510,19 +514,13 @@ async function seedBranchContainmentRun(
       responsibleUserId: "responsible-user",
       issueNumber: 2,
       identifier: sameSiblingIdentifier,
-      // R1 allocator exclusivity invariant: the sibling must NOT share the
-      // source's `executionWorkspaceId` while still open (`status != done`).
-      // Sharing would cause the source's spawn-time allocator to refuse the
-      // binding and provision fresh, so the persisted_restore call site that
-      // this test covers could not exercise the recorded branch validation
-      // path. Seed a separate sibling workspace (and a non-overlapping
-      // preference) so the source can restore as seeded.
-      executionWorkspaceId: null,
-      executionWorkspacePreference: null,
+      executionWorkspaceId: callSite === "finalize" ? null : sourceExecutionWorkspaceId,
+      executionWorkspacePreference: callSite === "finalize" ? null : "reuse_existing",
       executionWorkspaceSettings: {
         mode: "isolated_workspace",
       },
       startedAt: now,
+      completedAt: now,
       createdAt: now,
       updatedAt: now,
     },
@@ -647,7 +645,7 @@ async function expectContainedWorkspaceBranchFailure(input: {
     checkoutRunId: null,
   });
   expect(issueById.get(input.sameWorkspaceSiblingId)).toMatchObject({
-    status: "in_progress",
+    status: "done",
     executionRunId: null,
     checkoutRunId: null,
   });

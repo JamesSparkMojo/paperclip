@@ -3283,6 +3283,10 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     });
 
     // Second open issue on the same workspace must be rejected at the DB layer.
+    // The DB error surfaces as a PostgresError wrapped by DrizzleQueryError.cause;
+    // the constraint name is on `constraint_name` (not `constraint`), and the SQLSTATE
+    // is 23505. Assert on both so the test fails loudly if the partial index ever
+    // disappears or its predicate drifts.
     await expect(
       db.insert(issues).values({
         id: randomUUID(),
@@ -3296,7 +3300,9 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       }),
     ).rejects.toMatchObject({
       cause: expect.objectContaining({
-        constraint: "issues_execution_workspace_id_open_uniq",
+        code: "23505",
+        constraint_name: "issues_execution_workspace_id_open_uniq",
+        message: expect.stringContaining("issues_execution_workspace_id_open_uniq"),
       }),
     });
 

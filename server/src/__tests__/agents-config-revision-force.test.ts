@@ -88,17 +88,24 @@ describeEmbeddedPostgres("agent service revision force flag (SPA-5925)", () => {
     // adapterConfig must still produce an audit row, because the file on
     // disk is the source of truth and a content edit can be invisible at the
     // adapterConfig snapshot layer.
-    const { agentId } = await seedAgent({
+    const seedAdapterConfig = {
       instructionsBundleMode: "managed",
       instructionsRootPath: "/tmp/agent-1",
       instructionsEntryFile: "AGENTS.md",
       instructionsFilePath: "/tmp/agent-1/AGENTS.md",
-    });
+    };
+    const { agentId } = await seedAgent(seedAdapterConfig);
 
     const services = agentService(db);
+    // Round-trip the seed through the same normalization the service uses so
+    // the post-update snapshot is byte-identical to the pre-update snapshot.
+    // Passing a literal `{}` here triggers a real diff in the normalized
+    // adapterConfig shape (the secret-binding sync step writes keys back),
+    // which is not what the route handler does — the bundle PUT always passes
+    // the full `result.adapterConfig` from `instructions.writeFile`.
     await services.update(
       agentId,
-      { adapterConfig: {} },
+      { adapterConfig: seedAdapterConfig },
       {
         recordRevision: {
           source: "instructions_bundle_file_put",

@@ -67,6 +67,15 @@ interface RevisionMetadata {
   createdByUserId?: string | null;
   source?: string;
   rolledBackFromRevisionId?: string | null;
+  /**
+   * When true, a revision row is always written whenever the request asked
+   * for a revision (even if the config snapshot is byte-for-byte identical).
+   * Used by instructions-bundle/file handlers: the file on disk is the system
+   * of record, adapterConfig is just the denormalized cache, and a content
+   * edit can be semantically meaningful even when adapterConfig normalizes
+   * to the same shape.
+   */
+  force?: boolean;
 }
 
 interface UpdateAgentOptions {
@@ -527,7 +536,10 @@ export function agentService(db: Db) {
       );
     }
 
-    const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
+    const revisionRequested = Boolean(options?.recordRevision);
+    const forceRevision = revisionRequested && options?.recordRevision?.force === true;
+    const shouldRecordRevision =
+      revisionRequested && (hasConfigPatchFields(normalizedPatch) || forceRevision);
     const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;
 
     type AgentUpdateResult = Awaited<ReturnType<typeof getById>>;
@@ -552,7 +564,11 @@ export function agentService(db: Db) {
       if (shouldRecordRevision && beforeConfig) {
         const afterConfig = buildConfigSnapshot(normalizedUpdated);
         const changedKeys = diffConfigSnapshot(beforeConfig, afterConfig);
-        if (changedKeys.length > 0) {
+        if (changedKeys.length > 0 || forceRevision) {
+          const recordedChangedKeys =
+            changedKeys.length > 0
+              ? changedKeys
+              : ["instructionsFileContent"];
           await txDb.insert(agentConfigRevisions).values({
             companyId: normalizedUpdated.companyId,
             agentId: normalizedUpdated.id,
@@ -560,7 +576,7 @@ export function agentService(db: Db) {
             createdByUserId: options?.recordRevision?.createdByUserId ?? null,
             source: options?.recordRevision?.source ?? "patch",
             rolledBackFromRevisionId: options?.recordRevision?.rolledBackFromRevisionId ?? null,
-            changedKeys,
+            changedKeys: recordedChangedKeys,
             beforeConfig: beforeConfig as unknown as Record<string, unknown>,
             afterConfig: afterConfig as unknown as Record<string, unknown>,
           });

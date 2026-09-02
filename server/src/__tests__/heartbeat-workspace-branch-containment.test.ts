@@ -227,7 +227,7 @@ async function waitForContainmentSideEffects(input: {
       source?.status === "blocked" &&
       source.executionRunId === null &&
       source.checkoutRunId === null &&
-      sameWorkspaceSibling?.status === "in_progress" &&
+      sameWorkspaceSibling?.status === "done" &&
       sameWorkspaceSibling.executionRunId === null &&
       sameWorkspaceSibling.checkoutRunId === null &&
       otherWorkspaceSibling?.status === "in_progress" &&
@@ -499,7 +499,11 @@ async function seedBranchContainmentRun(
       projectId,
       projectWorkspaceId,
       title: "Same-workspace sibling",
-      status: "in_progress",
+      // SPA-5926: done so the workspace binding is excluded from the partial index
+      // (WHERE status NOT IN ('done', 'cancelled')) — keeps the "corrupted" shared-workspace
+      // state (same execution_workspace_id as source) without violating
+      // issues_execution_workspace_id_open_uniq. The sibling still holds the workspace binding.
+      status: "done",
       workMode: "standard",
       priority: "medium",
       assigneeAgentId: agentId,
@@ -516,6 +520,7 @@ async function seedBranchContainmentRun(
         mode: "isolated_workspace",
       },
       startedAt: now,
+      completedAt: now,
       createdAt: now,
       updatedAt: now,
     },
@@ -640,7 +645,7 @@ async function expectContainedWorkspaceBranchFailure(input: {
     checkoutRunId: null,
   });
   expect(issueById.get(input.sameWorkspaceSiblingId)).toMatchObject({
-    status: "in_progress",
+    status: "done",
     executionRunId: null,
     checkoutRunId: null,
   });

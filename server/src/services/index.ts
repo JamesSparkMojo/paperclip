@@ -161,6 +161,14 @@ export { workspaceOperationService } from "./workspace-operations.js";
 export { workspaceFileResourceService } from "./workspace-file-resources.js";
 export { workProductService } from "./work-products.js";
 export {
+  ghPullRequestService,
+  parseGitHubRepo,
+  ghListOpenPullRequestForBranch,
+  type GhPullRequestLookupInput,
+  type GhPullRequestMatch,
+  type GhPullRequestService,
+} from "./gh-pull-request.js";
+export {
   logActivity,
   persistActivity,
   publishActivity,

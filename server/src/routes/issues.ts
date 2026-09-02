@@ -133,6 +133,7 @@ import {
   projectService,
   routineService,
   workProductService,
+  ghPullRequestService,
 } from "../services/index.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
 import {
@@ -2730,6 +2731,7 @@ export function issueRoutes(
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const executionWorkspacesSvc = executionWorkspaceServiceDirect(db);
   const workProductsSvc = workProductService(db);
+  const ghPrsSvc = ghPullRequestService();
   const documentsSvc = documentService(db);
   const companySkillsSvc = companySkillService(db);
   const documentAnnotationsSvc = documentAnnotationService(db);
@@ -3372,6 +3374,145 @@ export function issueRoutes(
       environmentId,
       { allowedDrivers: ["local", "ssh", "sandbox"] },
     );
+  }
+
+  // SPA-5971 R1: a build-leaf card cannot transition into in_review without
+  // an open PR whose head equals the pushed branch head. Refuses 409 with the
+  // exact gh pr create line so the builder self-fixes. SPA-5943 canary: SPA-5955
+  // + SPA-5957 went done with branches pushed and no PR; this guard is the
+  // mechanical seatbelt for that hole. Also gates the DEPLOY-GATE card
+  // (R3/R4 leaves own that side of the seam).
+  async function assertOpenPrForBranchPrecondition(input: {
+    res: Response;
+    existing: {
+      id: string;
+      companyId: string;
+      projectId: string | null;
+      status: string;
+      title: string;
+      labels?: Array<{ name: string }> | null;
+      executionPolicy?: unknown;
+    };
+    updateFields: Record<string, unknown>;
+  }) {
+    if (
+      input.existing.status === "in_review" ||
+      input.updateFields.status !== "in_review"
+    ) {
+      return;
+    }
+    const hasBuildLabel = Array.isArray(input.existing.labels)
+      && input.existing.labels.some((label) => label?.name === "Build");
+    const hasStages = (() => {
+      const policy = input.updateFields.executionPolicy !== undefined
+        ? input.updateFields.executionPolicy
+        : input.existing.executionPolicy;
+      if (!policy || typeof policy !== "object") return false;
+      const stages = (policy as { stages?: unknown }).stages;
+      return Array.isArray(stages) && stages.length > 0;
+    })();
+
+    const workProducts = await workProductsSvc.listForIssue(input.existing.id);
+    const branchWp = workProducts.find(
+      (wp) => wp.type === "branch" && wp.isPrimary,
+    ) ?? workProducts.find((wp) => wp.type === "branch");
+    // Spec gate: Build label OR (stages AND branch WP). Canary SPA-5955/5957
+    // were build leaves with branch WPs but empty executionPolicy.stages; their
+    // branch WP is the universal indicator, so add it as a third condition so
+    // those cards are caught too. If the card has none of (Build label, stages
+    // + branch WP, branch WP alone), the card is not a build-leaf and we
+    // leave it to the existing review-path guard.
+    if (!branchWp && !hasBuildLabel) return;
+    if (!branchWp) return;
+
+    const metadata = (branchWp.metadata ?? {}) as Record<string, unknown>;
+    const branchName =
+      typeof metadata.branchName === "string"
+        ? metadata.branchName
+        : typeof branchWp.externalId === "string"
+          ? branchWp.externalId
+          : typeof branchWp.title === "string"
+            ? branchWp.title
+            : null;
+    const headSha =
+      typeof metadata.headSha === "string"
+        ? metadata.headSha
+        : typeof metadata.commitSha === "string"
+          ? metadata.commitSha
+          : null;
+    if (!branchName || !headSha) return;
+
+    const repoUrl = await resolveIssueRepoUrl({
+      id: input.existing.id,
+      companyId: input.existing.companyId,
+      projectId: input.existing.projectId,
+    });
+    if (!repoUrl) return;
+
+    const match = await ghPrsSvc.findOpenByBranch({
+      repoUrl,
+      branchName,
+      expectedHeadSha: headSha,
+    });
+    if (match) return;
+
+    const baseBranch = await resolveIssueBaseBranch(input.existing);
+    const baseRef = baseBranch ?? "main";
+    throw conflict(
+      `open PR for branch ${branchName} not found; create one with: gh pr create --base ${baseRef} --head ${branchName} --title "${input.existing.title}" --body-file <...>`,
+      {
+        code: "open_pr_required",
+        issueId: input.existing.id,
+        branchName,
+        headSha,
+        repoUrl,
+      },
+    );
+  }
+
+  async function resolveIssueRepoUrl(issue: {
+    id: string;
+    companyId: string;
+    projectId: string | null;
+  }): Promise<string | null> {
+    const wsRows = await db
+      .select({ repoUrl: executionWorkspaces.repoUrl })
+      .from(executionWorkspaces)
+      .where(and(
+        eq(executionWorkspaces.companyId, issue.companyId),
+        eq(executionWorkspaces.sourceIssueId, issue.id),
+        eq(executionWorkspaces.status, "active"),
+      ))
+      .orderBy(desc(executionWorkspaces.openedAt))
+      .limit(1);
+    if (wsRows[0]?.repoUrl) return wsRows[0].repoUrl;
+    if (!issue.projectId) return null;
+    const projectRows = await db
+      .select({ repoUrl: projectWorkspaces.repoUrl })
+      .from(projectWorkspaces)
+      .where(and(
+        eq(projectWorkspaces.companyId, issue.companyId),
+        eq(projectWorkspaces.projectId, issue.projectId),
+      ))
+      .limit(1);
+    return projectRows[0]?.repoUrl ?? null;
+  }
+
+  async function resolveIssueBaseBranch(issue: {
+    companyId: string;
+    projectId: string | null;
+  }): Promise<string | null> {
+    if (!issue.projectId) return null;
+    const rows = await db
+      .select({ repoRef: projectWorkspaces.repoRef })
+      .from(projectWorkspaces)
+      .where(and(
+        eq(projectWorkspaces.companyId, issue.companyId),
+        eq(projectWorkspaces.projectId, issue.projectId),
+      ))
+      .limit(1);
+    const ref = rows[0]?.repoRef;
+    return typeof ref === "string" && ref.length > 0 ? ref : null;
   }
 
   async function assertAgentInReviewReviewPath(input: {
@@ -8839,6 +8980,12 @@ export function issueRoutes(
         };
       }
     }
+
+    await assertOpenPrForBranchPrecondition({
+      res,
+      existing,
+      updateFields,
+    });
 
     const reviewInteractionId = await assertAgentInReviewReviewPath({
       existing,

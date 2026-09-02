@@ -2721,7 +2721,10 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       projectId,
       projectWorkspaceId,
       title: "Parent issue",
-      status: "in_progress",
+      // SPA-5926: done so the workspace binding is excluded from the partial index
+      // (WHERE status NOT IN ('done','cancelled')) and R1 exclusivity check.
+      // Child can still inherit the workspace from a terminal parent.
+      status: "done",
       priority: "medium",
       executionWorkspaceId,
       executionWorkspacePreference: "reuse_existing",
@@ -2729,6 +2732,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         mode: "isolated_workspace",
         workspaceRuntime: { profile: "agent" },
       },
+      completedAt: new Date("2026-06-03T09:00:00.000Z"),
     });
 
     const child = await svc.create(companyId, {
@@ -3328,13 +3332,15 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       projectId,
       projectWorkspaceId,
       title: "Source issue",
-      status: "todo",
+      // SPA-5926: done so the workspace binding is excluded from the partial index.
+      status: "done",
       priority: "medium",
       executionWorkspaceId,
       executionWorkspacePreference: "reuse_existing",
       executionWorkspaceSettings: {
         mode: "operator_branch",
       },
+      completedAt: new Date("2026-06-03T09:00:00.000Z"),
     });
 
     const followUp = await svc.create(companyId, {
@@ -3412,7 +3418,8 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       projectWorkspaceId,
       goalId,
       title: "Parent issue",
-      status: "in_progress",
+      // SPA-5926: done so the workspace binding is excluded from the partial index.
+      status: "done",
       priority: "medium",
       requestDepth: 1,
       executionWorkspaceId,
@@ -3420,6 +3427,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       executionWorkspaceSettings: {
         mode: "isolated_workspace",
       },
+      completedAt: new Date("2026-06-03T09:00:00.000Z"),
     });
 
     const { issue: child, parentBlockerAdded } = await svc.createChild(parentIssueId, {
@@ -4537,7 +4545,8 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       projectId,
       projectWorkspaceId,
       title: "Parent issue",
-      status: "in_progress",
+      // SPA-5926: done so the workspace binding is excluded from the partial index.
+      status: "done",
       priority: "medium",
       executionWorkspaceId,
       executionWorkspacePreference: "reuse_existing",
@@ -4545,6 +4554,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         mode: "isolated_workspace",
         workspaceRuntime: { profile: "agent" },
       },
+      completedAt: new Date("2026-06-03T09:00:00.000Z"),
     });
 
     const child = await svc.create(companyId, {
@@ -4611,13 +4621,15 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       projectId,
       projectWorkspaceId,
       title: "Parent issue",
-      status: "in_progress",
+      // SPA-5926: done so the workspace binding is excluded from the partial index.
+      status: "done",
       priority: "medium",
       executionWorkspaceId,
       executionWorkspacePreference: "reuse_existing",
       executionWorkspaceSettings: {
         mode: "isolated_workspace",
       },
+      completedAt: new Date("2026-06-03T09:00:00.000Z"),
     });
 
     const child = await svc.create(companyId, {
@@ -4833,13 +4845,15 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       projectId,
       projectWorkspaceId,
       title: "Source issue",
-      status: "todo",
+      // SPA-5926: done so the workspace binding is excluded from the partial index.
+      status: "done",
       priority: "medium",
       executionWorkspaceId,
       executionWorkspacePreference: "reuse_existing",
       executionWorkspaceSettings: {
         mode: "operator_branch",
       },
+      completedAt: new Date("2026-06-03T09:00:00.000Z"),
     });
 
     const followUp = await svc.create(companyId, {

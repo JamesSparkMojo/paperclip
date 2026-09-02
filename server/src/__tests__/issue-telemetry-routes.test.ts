@@ -112,6 +112,8 @@ function registerModuleMocks() {
       syncRunStatusForIssue: vi.fn(async () => undefined),
     }),
     workProductService: () => ({}),
+    listForIssue: vi.fn(async () => []),
+    ghPullRequestService: () => ({ findOpenByBranch: vi.fn(async () => null) }),
   }));
 }
 

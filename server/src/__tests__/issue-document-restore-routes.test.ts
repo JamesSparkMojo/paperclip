@@ -149,7 +149,10 @@ function registerModuleMocks() {
     logActivity: mockLogActivity,
     projectService: () => ({}),
     routineService: () => mockRoutineService,
-    workProductService: () => ({}),
+    workProductService: () => ({
+    listForIssue: vi.fn(async () => []),
+    }),
+    ghPullRequestService: () => ({ findOpenByBranch: vi.fn(async () => null) }),
   }));
 }
 

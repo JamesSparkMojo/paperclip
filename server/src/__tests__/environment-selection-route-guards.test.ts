@@ -95,7 +95,10 @@ vi.mock("../services/index.js", () => ({
   documentService: () => ({}),
   documentAnnotationService: () => ({ remapOpenThreadsForDocument: async () => [] }),
   routineService: () => ({}),
-  workProductService: () => ({}),
+  workProductService: () => ({
+  listForIssue: vi.fn(async () => []),
+    }),
+  ghPullRequestService: () => ({ findOpenByBranch: vi.fn(async () => null) }),
 }));
 
 vi.mock("../services/environments.js", () => ({

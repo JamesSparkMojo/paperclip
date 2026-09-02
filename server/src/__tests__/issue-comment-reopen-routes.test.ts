@@ -169,6 +169,8 @@ vi.mock("../services/index.js", () => ({
   projectService: () => ({}),
   routineService: () => mockRoutineService,
   workProductService: () => ({}),
+  listForIssue: vi.fn(async () => []),
+  ghPullRequestService: () => ({ findOpenByBranch: vi.fn(async () => null) }),
 }));
 
 vi.mock("../services/external-objects.js", () => ({

@@ -99,7 +99,9 @@ vi.mock("../services/index.js", () => ({
   routineService: () => ({
     syncRunStatusForIssue: vi.fn(async () => undefined),
   }),
-  workProductService: () => ({}),
+  workProductService: () => ({
+      listForIssue: vi.fn(async () => []),
+    }),
 }));
 
 function registerModuleMocks() {
@@ -171,7 +173,10 @@ function registerModuleMocks() {
     routineService: () => ({
       syncRunStatusForIssue: vi.fn(async () => undefined),
     }),
-    workProductService: () => ({}),
+    workProductService: () => ({
+      listForIssue: vi.fn(async () => []),
+    }),
+    ghPullRequestService: () => ({ findOpenByBranch: vi.fn(async () => null) }),
   }));
 }
 

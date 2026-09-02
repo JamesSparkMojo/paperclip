@@ -128,7 +128,10 @@ vi.mock("../services/index.js", () => ({
   routineService: () => ({
     syncRunStatusForIssue: vi.fn(async () => undefined),
   }),
-  workProductService: () => ({}),
+  workProductService: () => ({
+  listForIssue: vi.fn(async () => []),
+    }),
+  ghPullRequestService: () => ({ findOpenByBranch: vi.fn(async () => null) }),
 }));
 
 import { errorHandler } from "../middleware/index.js";

@@ -59,6 +59,7 @@ const mockWorkProductService = vi.hoisted(() => ({
   getById: vi.fn(),
   remove: vi.fn(),
   update: vi.fn(),
+  listForIssue: vi.fn(async () => []),
 }));
 
 const mockStorageService = vi.hoisted(() => ({
@@ -240,6 +241,7 @@ function registerRouteMocks() {
       syncRunStatusForIssue: vi.fn(async () => undefined),
     }),
     workProductService: () => mockWorkProductService,
+    ghPullRequestService: () => ({ findOpenByBranch: vi.fn(async () => null) }),
   }));
 }
 

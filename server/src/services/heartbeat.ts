@@ -16372,9 +16372,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       | undefined;
   }) {
     const failureSummary = summarizeRunFailureForIssueComment(input.latestRun);
-    const validationReason = readNonEmptyString(
-      readWorkspaceValidationPayloadFromRun(input.latestRun).reason,
-    );
+    const payload = readWorkspaceValidationPayloadFromRun(input.latestRun);
+    const validationReason = readNonEmptyString(payload.reason);
+    const incoherenceClass = readNonEmptyString((payload as Record<string, unknown>).incoherenceClass);
+    const classSuffix = incoherenceClass ? ` (failure class ${incoherenceClass})` : "";
     if (validationReason === "git_worktree_base_materialization_failed") {
       return (
         "Paperclip stopped before launching the local adapter because the project workspace checkout could not be prepared " +
@@ -16383,7 +16384,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       );
     }
     return (
-      "Paperclip stopped before launching the local adapter because the issue workspace failed validation. " +
+      "Paperclip stopped before launching the local adapter because the issue workspace failed validation" +
+      classSuffix +
+      ". " +
       `This prevents git-sensitive adapters from running in an unrelated fallback cwd.${failureSummary ?? ""} ` +
       "Moving it to `blocked` with a source-scoped recovery action so the workspace link, cwd, or git checkout can be repaired before resuming."
     );

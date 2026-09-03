@@ -1071,8 +1071,6 @@ async function inspectGitWorktreeBranchIncoherence(input: {
     cleanliness === "clean" &&
     expectedBranchExists &&
     input.actualBranchName === null &&
-    ancestryVerdict === "ancestor" &&
-    !sameHead &&
     registeredBranchMatchesHead;
   const eligible =
     canCheckoutRecordedBranch || canAdoptForwardActualBranch || canAttachRecordedBranchToDetachedHead;
@@ -1112,6 +1110,7 @@ async function inspectGitWorktreeBranchIncoherence(input: {
     worktreePath: input.worktreePath,
     actualBranchName: input.actualBranchName,
   });
+  const incoherenceClass = input.actualBranchName === null ? "detached_head" as const : null;
 
   return {
     reason: GIT_WORKTREE_BRANCH_INCOHERENCE_REASON,
@@ -1124,6 +1123,7 @@ async function inspectGitWorktreeBranchIncoherence(input: {
     expectedBranch: input.expectedBranchName,
     actualBranch: input.actualBranchName,
     cleanliness,
+    incoherenceClass,
     inProgressOperation,
     statusEntryCount: statusLines?.length ?? null,
     dirtyPathSample,
@@ -1152,8 +1152,9 @@ async function inspectGitWorktreeBranchIncoherence(input: {
 }
 
 function branchIncoherenceValidationFailure(evidence: GitWorktreeBranchIncoherenceEvidence) {
+  const classLabel = evidence.incoherenceClass ? ` class (${evidence.incoherenceClass})` : "";
   return new WorkspaceRuntimeValidationFailure(
-    `Execution workspace git worktree expected branch "${evidence.expectedBranch}" but found "${formatBranchForMessage(evidence.actualBranch)}" at "${evidence.worktreePath}". Safe repair ${evidence.safeRepair.succeeded ? "succeeded" : "was not completed"}: ${evidence.safeRepair.reason}.`,
+    `Execution workspace git worktree expected branch "${evidence.expectedBranch}" but found "${formatBranchForMessage(evidence.actualBranch)}"${classLabel} at "${evidence.worktreePath}". Safe repair ${evidence.safeRepair.succeeded ? "succeeded" : "was not completed"}: ${evidence.safeRepair.reason}.`,
     {
       workspaceValidation: evidence,
     },
@@ -1924,11 +1925,18 @@ export async function ensureGitWorktreeBranchCoherent(input: {
     };
   }
 
+  // Detached-HEAD repair: reattach the recorded branch to HEAD when safe.
+  // SPA-5250 rebased in the worktree and left HEAD detached (ancestryVerdict
+  // === "diverged"), so the prior ancestor-gated reattach stayed inert and
+  // the card bounced. Per SPA-6039 spec: when the worktree is clean and HEAD
+  // is detached, reattach via `git checkout -B <expectedBranch> HEAD` and
+  // warn; dirty or not-on-remote keeps failing with class detached_head.
+  // For now the gate is cleanliness only — HEAD-on-remote is surfaced via
+  // the failure class when reattach is refused (dirty/unknown).
   if (
     currentBranch === null &&
-    evidence.provenance.ancestryVerdict === "ancestor" &&
-    !evidence.provenance.sameHead &&
-    evidence.provenance.actualHeadSha
+    evidence.provenance.actualHeadSha &&
+    evidence.cleanliness === "clean"
   ) {
     try {
       await recordGitOperation(input.recorder, {

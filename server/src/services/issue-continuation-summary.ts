@@ -11,6 +11,15 @@ const SUMMARY_SECTION_MAX_CHARS = 1_200;
 const PATH_CANDIDATE_RE = /(?:^|[\s`"'(])((?:server|ui|packages|doc|scripts|\.github)\/[A-Za-z0-9._/-]+)/g;
 const WAITING_FOR_REVIEW_OR_APPROVAL_RE =
   /\bwait(?:ing)? for\b.{0,160}\b(?:review(?:er)?(?: feedback)?|approval|board|human|user|operator)\b/i;
+// SPA-6043: next-actions that name an external service should NOT be treated as
+// the in_review park. Those are "deploy / CI / Codex" oracle waits — leave the
+// card with its owner and re-wake it after a delay, don't escalate to the
+// manager. The park regex stays narrow (review/approval/board/human) on purpose.
+export const EXTERNAL_WAIT_RE =
+  /\b(?:deploy(?:ment)?|CI|Codex|verifier|oracle|external)\b/i;
+export const DELIBERATE_CONTINUATION_WAIT_ERROR_CODES = [
+  "issue_continuation_waiting_on_review",
+] as const;
 
 type IssueSummaryInput = {
   id: string;
@@ -131,6 +140,13 @@ export function continuationSummaryParksExecutor(body: string | null | undefined
   const nextAction = extractContinuationSummaryNextAction(body);
   if (!nextAction) return false;
   return WAITING_FOR_REVIEW_OR_APPROVAL_RE.test(nextAction);
+}
+
+export function continuationSummaryExternalWait(body: string | null | undefined) {
+  const nextAction = extractContinuationSummaryNextAction(body);
+  if (!nextAction) return null;
+  if (continuationSummaryParksExecutor(body)) return null; // review/approval park takes precedence
+  return EXTERNAL_WAIT_RE.test(nextAction) ? nextAction.slice(0, 400) : null;
 }
 
 export function buildContinuationSummaryMarkdown(input: {

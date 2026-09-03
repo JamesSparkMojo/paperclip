@@ -83,6 +83,14 @@ export const ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS = 60 * 60 * 1000;
 export const ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS = 4 * 60 * 60 * 1000;
 export const ACTIVE_RUN_OUTPUT_CONTINUE_REARM_MS = 30 * 60 * 1000;
 export const DEFAULT_LIVENESS_REESCALATION_COOLDOWN_MS = 60 * 60 * 1000;
+// SPA-6006: when `createIssueGraphLivenessEscalation` keeps failing for the same
+// incident key (e.g. repeated DB errors), the periodic 30s heartbeat tick would
+// retry the INSERT forever and wake the assignee on every attempt. We hold a
+// module-scoped ledger of the last failure per incident key, and on a second
+// identical failure inside this window we silently back off (no log line, no
+// assignee wake). The state is in-memory; the on-disk dedupe is already
+// guaranteed by the `issues_active_liveness_recovery_*` partial unique indexes.
+const LIVENESS_RECOVERY_INSERT_FAILURE_BACKOFF_MS = 60 * 60 * 1000;
 const ACTIVE_RUN_OUTPUT_EVIDENCE_TAIL_BYTES = 8 * 1024;
 const STRANDED_ISSUE_RECOVERY_ORIGIN_KIND = RECOVERY_ORIGIN_KINDS.strandedIssueRecovery;
 const STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND = RECOVERY_ORIGIN_KINDS.staleActiveRunEvaluation;
@@ -724,6 +732,23 @@ function isUniqueLivenessRecoveryConflict(error: unknown) {
     );
 }
 
+// SPA-6006: stable signature for repeated INSERT failures so the backoff log
+// can collapse identical errors inside the cooldown window. We intentionally
+// avoid full message text (it varies per run) and use PG code + constraint
+// + first ~120 chars of the message.
+function describeLivenessRecoveryInsertFailure(error: unknown) {
+  if (!error || typeof error !== "object") return "unknown";
+  const maybe = error as { code?: string; constraint?: string; message?: string };
+  const messageHead = typeof maybe.message === "string"
+    ? maybe.message.slice(0, 120).replace(/\s+/g, " ").trim()
+    : "";
+  return [
+    maybe.code ?? "no-code",
+    maybe.constraint ?? "no-constraint",
+    messageHead,
+  ].join("|");
+}
+
 function formatDependencyPath(finding: IssueLivenessFinding) {
   return finding.dependencyPath
     .map((entry) => entry.identifier ?? entry.issueId)
@@ -783,6 +808,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   const instanceSettings = instanceSettingsService(db);
   const runLogStore = getRunLogStore();
   let resolvedDependencyWakeBackstopCandidateCursor: string | null = null;
+  // SPA-6006: per-incident-key ledger of the last INSERT failure so a repeated
+  // identical failure inside LIVENESS_RECOVERY_INSERT_FAILURE_BACKOFF_MS does not
+  // log again or invoke any agent heartbeat. Cleared when an INSERT succeeds.
+  const lastLivenessRecoveryInsertFailureAtByIncidentKey = new Map<string, number>();
+  let lastLivenessRecoveryInsertFailureSignature: string | null = null;
+  let lastLivenessRecoveryInsertFailureLoggedAt: number | null = null;
 
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
@@ -4887,8 +4918,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     recoveryIssue: typeof issues.$inferSelect;
     ownerAgentId: string;
   }) {
-    if (input.finding.recoveryIssueId === input.finding.issueId) return false;
-    return input.recoveryIssue.assigneeAgentId === input.ownerAgentId;
+    // The recovery escalation is always a fresh incident card; it must NOT copy
+    // the recovery issue's `executionWorkspaceId` because a partial unique index
+    // allows at most one OPEN issue per execution workspace (SPA-6006). If the
+    // recovery issue itself is still open and holds that workspace, inheriting
+    // it here would trip `issues_execution_workspace_id_open_uniq`, throw on
+    // INSERT, and start a per-30s retry loop that wakes the owner heartbeat.
+    // Reusing the worktree is therefore disabled: the new escalation is born
+    // with `executionWorkspaceId = null` and provisioning will assign it later.
+    return false;
   }
 
   async function ensureIssueBlockedByEscalation(input: {
@@ -4944,6 +4982,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     now: Date;
     reescalationCooldownMs: number;
   }) {
+    // SPA-6006: back off silently when this incident key already failed within
+    // the cooldown window. Avoids the per-30s log spam and the per-30s heartbeat
+    // wake that would otherwise land on the assignee.
+    const lastFailureAt = lastLivenessRecoveryInsertFailureAtByIncidentKey.get(input.finding.incidentKey);
+    if (
+      lastFailureAt !== undefined &&
+      input.now.getTime() - lastFailureAt < LIVENESS_RECOVERY_INSERT_FAILURE_BACKOFF_MS
+    ) {
+      return { kind: "skipped" as const };
+    }
+
     const issue = await db
       .select()
       .from(issues)
@@ -5014,7 +5063,38 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           }),
       });
     } catch (error) {
-      if (!isUniqueLivenessRecoveryConflict(error)) throw error;
+      if (!isUniqueLivenessRecoveryConflict(error)) {
+        // SPA-6006: any non-raced-recovery INSERT failure (e.g. workspace
+        // uniqueness, FK violation, transient DB error) must NOT wake the
+        // assignee. Record the failure so the next tick backs off and emit
+        // a single log line per identical signature within the backoff
+        // window. The catch at the outer periodic tick (server/src/index.ts)
+        // will still surface the error — we are narrowing the log volume, not
+        // hiding the failure.
+        const signature = `${input.finding.incidentKey}:${describeLivenessRecoveryInsertFailure(error)}`;
+        const nowMs = input.now.getTime();
+        const shouldLog =
+          signature !== lastLivenessRecoveryInsertFailureSignature ||
+          lastLivenessRecoveryInsertFailureLoggedAt === null ||
+          nowMs - lastLivenessRecoveryInsertFailureLoggedAt >= LIVENESS_RECOVERY_INSERT_FAILURE_BACKOFF_MS;
+        lastLivenessRecoveryInsertFailureAtByIncidentKey.set(input.finding.incidentKey, nowMs);
+        if (shouldLog) {
+          logger.error(
+            {
+              err: error,
+              incidentKey: input.finding.incidentKey,
+              findingState: input.finding.state,
+              sourceIssueId: issue.id,
+              recoveryIssueId: recoveryIssue.id,
+              backoffMs: LIVENESS_RECOVERY_INSERT_FAILURE_BACKOFF_MS,
+            },
+            "issue graph liveness escalation INSERT failed; backing off (no assignee wake)",
+          );
+          lastLivenessRecoveryInsertFailureSignature = signature;
+          lastLivenessRecoveryInsertFailureLoggedAt = nowMs;
+        }
+        throw error;
+      }
       const raced =
         await findOpenLivenessEscalation(issue.companyId, input.finding.incidentKey) ??
         await findOpenLivenessRecoveryIssueForLeaf(input.finding);
@@ -5025,6 +5105,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         finding: input.finding,
         runId: input.runId ?? null,
       });
+      // A raced escalation already exists from a parallel reconciliation —
+      // clear the backoff for this incident key so a future genuine error
+      // starts a fresh backoff window.
+      lastLivenessRecoveryInsertFailureAtByIncidentKey.delete(input.finding.incidentKey);
       return { kind: "existing" as const, escalationIssueId: raced.id };
     }
 
@@ -5077,6 +5161,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       },
     });
 
+    // SPA-6006: the row committed, so any prior backoff state for the same
+    // incident key is stale. Clearing here means a future distinct failure
+    // starts a fresh 1-hour window instead of inheriting a stale timestamp.
+    lastLivenessRecoveryInsertFailureAtByIncidentKey.delete(input.finding.incidentKey);
     const wake = await deps.enqueueWakeup(ownerSelection.agentId, {
       source: "assignment",
       triggerDetail: "system",

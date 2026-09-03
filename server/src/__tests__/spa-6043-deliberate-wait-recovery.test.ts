@@ -163,8 +163,13 @@ describeEmbeddedPostgres("SPA-6043 deliberate continuation waits (recovery recon
     const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
     expect(updatedIssue).toMatchObject({
       status: "in_review",
-      assigneeAgentId: coderId,
+      assigneeAgentId: reviewerId,
     });
+    // The owner is preserved as the stage's returnAssignee (platform stage
+    // mechanic: assignee flips to the reviewer, owner restored on approve).
+    const returnAssignee = (updatedIssue?.executionState as { returnAssignee?: { agentId?: string | null } } | null)
+      ?.returnAssignee;
+    expect(returnAssignee?.agentId).toBe(coderId);
     expect(await db.select().from(issueRecoveryActions)).toHaveLength(0);
     const stageWakes = enqueueWakeup.mock.calls.filter(
       ([, wake]) => wake?.reason === "execution_review_requested",
@@ -209,7 +214,7 @@ describeEmbeddedPostgres("SPA-6043 deliberate continuation waits (recovery recon
     expect(managerWakes).toHaveLength(0);
     // One system comment names the wait.
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssueId));
-    expect(comments.some((comment) => (comment.body ?? "").includes("re-check scheduled"))).toBe(true);
+    expect(comments.some((comment) => (comment.body ?? "").includes("re-check at"))).toBe(true);
   });
 
   it("case 3: escalation only after the strand threshold, then a genuine escalation still lands", async () => {

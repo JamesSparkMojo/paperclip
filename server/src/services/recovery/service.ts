@@ -42,6 +42,7 @@ import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
 import { TERMINAL_HEARTBEAT_RUN_STATUSES, issueService } from "../issues.js";
 import {
+  applyIssueExecutionPolicyTransition,
   applyIssueMonitorPolicyTransition,
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
@@ -3310,6 +3311,265 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return updated;
   }
 
+  // SPA-6043: a continuation run the engine deliberately parked with
+  // `issue_continuation_waiting_on_review` is a *deliberate wait*, not a lost
+  // execution path. Three dispositions, in order:
+  //   1. the issue has an executionPolicy review stage -> advance it to
+  //      in_review so the stage dispatches the configured reviewer;
+  //   2. no review stage -> re-wake the SAME owner after a delay (this is the
+  //      "external wait" lane: deploy oracle, Codex round, CI run) with one
+  //      comment naming the wait; never reassign to the owner's manager;
+  //   3. only after DELIBERATE_WAIT_ESCALATION_THRESHOLD consecutive parked
+  //      strands does the ordinary escalation ladder take over.
+  const DELIBERATE_WAIT_ESCALATION_THRESHOLD = Math.max(
+    1,
+    Number(process.env.CONTINUATION_WAIT_ESCALATION_THRESHOLD) || 3,
+  );
+  const DELIBERATE_WAIT_RECHECK_DELAY_MS = Math.max(
+    60_000,
+    Number(process.env.CONTINUATION_WAIT_RECHECK_DELAY_MS) || 30 * 60 * 1000,
+  );
+
+  function issueHasReviewStage(issue: typeof issues.$inferSelect) {
+    const policy = normalizeIssueExecutionPolicy(issue.executionPolicy ?? null);
+    return Boolean(policy?.stages?.some((stage) => stage.type === "review"));
+  }
+
+  async function advanceParkedIssueToReviewStage(issue: typeof issues.$inferSelect) {
+    const policy = normalizeIssueExecutionPolicy(issue.executionPolicy ?? null);
+    if (!policy) return null;
+    const transition = applyIssueExecutionPolicyTransition({
+      issue,
+      policy,
+      previousPolicy: policy,
+      requestedStatus: "in_review",
+      requestedAssigneePatch: {},
+      actor: { agentId: null, userId: null },
+      allowBoardOverride: true,
+    });
+    const updated = await issuesSvc.update(issue.id, {
+      ...transition.patch,
+      status: "in_review",
+    });
+    if (!updated) return null;
+
+    // Dispatch the configured reviewer the same way the PATCH route does when a
+    // stage becomes pending (routes/issues.ts buildExecutionStageWakeup): the
+    // transition alone flips the status, the wake is what actually reaches the
+    // reviewer agent.
+    const nextState = parseIssueExecutionState(updated.executionState);
+    const reviewerAgentId = nextState?.status === "pending" && nextState.currentParticipant?.type === "agent"
+      ? nextState.currentParticipant.agentId
+      : null;
+    if (reviewerAgentId && nextState) {
+      const executionStage = {
+        wakeRole: nextState.currentStageType === "approval" ? "approver" as const : "reviewer" as const,
+        stageId: nextState.currentStageId,
+        stageType: nextState.currentStageType,
+        currentParticipant: nextState.currentParticipant,
+        returnAssignee: nextState.returnAssignee,
+        reviewRequest: nextState.reviewRequest ?? null,
+        lastDecisionOutcome: nextState.lastDecisionOutcome,
+        allowedActions: ["approve", "request_changes"],
+      };
+      const reason = nextState.currentStageType === "approval"
+        ? "execution_approval_requested"
+        : "execution_review_requested";
+      await deps.enqueueWakeup(reviewerAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason,
+        payload: {
+          issueId: issue.id,
+          mutation: "recovery",
+          executionStage,
+        },
+        requestedByActorType: "system",
+        requestedByActorId: null,
+        contextSnapshot: {
+          issueId: issue.id,
+          taskId: issue.id,
+          wakeReason: reason,
+          source: "recovery.reconcile_parked_issue_review_stage",
+          executionStage,
+        },
+      });
+    }
+
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: null,
+      runId: null,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        identifier: issue.identifier,
+        status: "in_review",
+        previousStatus: issue.status,
+        source: "recovery.reconcile_parked_issue_review_stage",
+      },
+    });
+    return updated;
+  }
+
+  async function countRecentDeliberateWaitStrands(
+    companyId: string,
+    issueId: string,
+    agentId: string,
+  ) {
+    const rows = await db
+      .select({
+        id: heartbeatRuns.id,
+        status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode,
+      })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.agentId, agentId),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
+        ),
+      )
+      .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
+      .limit(15);
+
+    let consecutive = 0;
+    for (const row of rows) {
+      if (row.errorCode !== CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE) break;
+      consecutive += 1;
+    }
+    return consecutive;
+  }
+
+  async function resolveDeliberateContinuationWait(input: {
+    issue: typeof issues.$inferSelect;
+    agentId: string;
+  }): Promise<
+    | { outcome: "advanced_to_review"; updated: typeof issues.$inferSelect }
+    | { outcome: "rewake_scheduled"; runId: string }
+    | { outcome: "escalate" }
+    | null
+  > {
+    const { issue, agentId } = input;
+
+    // Case 1: the policy has a review stage — dispatch the reviewer.
+    if (issueHasReviewStage(issue)) {
+      const updated = await advanceParkedIssueToReviewStage(issue);
+      if (updated) return { outcome: "advanced_to_review", updated };
+    }
+
+    // Case 2: no review stage -> re-wake the same owner after a delay. Only a
+    // sustained strand (>= threshold consecutive parked runs) graduates to the
+    // ordinary escalation ladder.
+    const strands = await countRecentDeliberateWaitStrands(issue.companyId, issue.id, agentId);
+    if (strands >= DELIBERATE_WAIT_ESCALATION_THRESHOLD) {
+      return { outcome: "escalate" };
+    }
+
+    if (await hasQueuedIssueWake(issue.companyId, issue.id, agentId)) return null;
+    if (await isInvocationBudgetBlocked(issue, agentId)) return null;
+
+    const now = new Date();
+    const retryAt = new Date(now.getTime() + DELIBERATE_WAIT_RECHECK_DELAY_MS);
+    const scheduled = await db.transaction(async (tx) => {
+      const wakeup = await tx
+        .insert(agentWakeupRequests)
+        .values({
+          companyId: issue.companyId,
+          agentId,
+          source: "automation",
+          triggerDetail: "system",
+          reason: "issue_continuation_needed",
+          payload: withRecoveryModelProfileHint({
+            issueId: issue.id,
+            retryReason: "issue_continuation_needed",
+            deliberateWaitRecheck: true,
+          }, "normal_model"),
+          status: "queued",
+          requestedByActorType: "system",
+          requestedByActorId: null,
+          idempotencyKey: `deliberate_wait_recheck:${issue.id}:${strands + 1}`,
+          updatedAt: now,
+        })
+        .returning()
+        .then((rows) => rows[0]!);
+      const scheduledRun = await tx
+        .insert(heartbeatRuns)
+        .values({
+          companyId: issue.companyId,
+          agentId,
+          invocationSource: "automation",
+          triggerDetail: "system",
+          status: "scheduled_retry",
+          wakeupRequestId: wakeup.id,
+          scheduledRetryAt: retryAt,
+          scheduledRetryAttempt: 1,
+          scheduledRetryReason: "issue_continuation_needed",
+          contextSnapshot: withRecoveryModelProfileHint({
+            issueId: issue.id,
+            taskId: issue.id,
+            wakeReason: "issue_continuation_needed",
+            retryReason: "issue_continuation_needed",
+            source: "recovery.deliberate_wait_recheck",
+            deliberateWaitRecheck: true,
+            deliberateWaitStrands: strands + 1,
+          }, "normal_model"),
+          updatedAt: now,
+        })
+        .returning()
+        .then((rows) => rows[0]!);
+      await tx
+        .update(agentWakeupRequests)
+        .set({ runId: scheduledRun.id, updatedAt: now })
+        .where(eq(agentWakeupRequests.id, wakeup.id));
+      return scheduledRun;
+    });
+
+    await issuesSvc.addComment(
+      issue.id,
+      "This task is parked by Paperclip (latest run reported waiting for review, a deploy, CI, or an external oracle). " +
+        `The original owner is scheduled for a re-check at ${retryAt.toISOString()}; no reassignment was made.`,
+      {},
+      {
+        authorType: "system",
+        presentation: compactRecoveryPresentation("Recovery: deliberate wait — owner re-check scheduled"),
+        metadata: {
+          version: 1,
+          sections: [{
+            title: "Recovery",
+            rows: [
+              { type: "key_value", label: "Cause", value: "issue_continuation_waiting_on_review" },
+              { type: "key_value", label: "Previous status", value: issue.status },
+              { type: "key_value", label: "Recheck at", value: retryAt.toISOString() },
+              { type: "key_value", label: "Deliberate wait strands", value: String(strands + 1) },
+            ],
+          }],
+        },
+      },
+    );
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: null,
+      runId: null,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        identifier: issue.identifier,
+        source: "recovery.reconcile_deliberate_continuation_wait",
+        recheckAt: retryAt.toISOString(),
+        strands: strands + 1,
+      },
+    });
+    return { outcome: "rewake_scheduled", runId: scheduled.id };
+  }
+
   async function escalateStrandedAssignedIssue(input: {
     issue: typeof issues.$inferSelect;
     previousStatus: StrandedPreviousStatus;
@@ -4205,6 +4465,28 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           if (resolved) {
             result.waitingOnReviewResolved += 1;
             result.issueIds.push(issue.id);
+            continue;
+          }
+
+          // SPA-6043: a deliberate wait is not a lost execution path. Try the
+          // review-stage / external-wait re-wake path before any escalation.
+          const deliberateWait = await resolveDeliberateContinuationWait({ issue, agentId });
+          if (deliberateWait?.outcome === "advanced_to_review") {
+            result.waitingOnReviewResolved += 1;
+            result.issueIds.push(issue.id);
+            continue;
+          }
+          if (deliberateWait?.outcome === "rewake_scheduled") {
+            result.continuationRequeued += 1;
+            result.issueIds.push(issue.id);
+            continue;
+          }
+          if (deliberateWait) {
+            // Threshold reached — from here the ordinary escalation ladder
+            // applies (reportsTo/cto/ceo), never before.
+          } else if (deliberateWait === null) {
+            // Already have a queued re-check; park cost is near-zero
+            result.skipped += 1;
             continue;
           }
         }

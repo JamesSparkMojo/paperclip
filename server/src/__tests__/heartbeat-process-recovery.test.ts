@@ -3237,6 +3237,39 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(validationComment?.body).not.toContain("failure class undefined");
   });
 
+  it("injects the failure class into the stranded recovery comment when the payload carries one (SPA-6039)", async () => {
+    // Positive case for Gate 3. `buildWorkspaceValidationRecoveryCommentText`
+    // is a pure formatter extracted from the inner recovery-comment closure;
+    // test it directly so the assertion is deterministic and does not depend
+    // on reaching the live dispatch workspace-validation gate.
+    const { buildWorkspaceValidationRecoveryCommentText } = await import("../services/heartbeat.ts");
+    const run = {
+      error: "Execution workspace git worktree expected branch \"PAP-455\" but found \"<detached>\" class (detached_head) at \"/tmp\".",
+      errorCode: "workspace_validation_failed" as const,
+      resultJson: {
+        workspaceValidation: {
+          reason: "git_worktree_branch_incoherence",
+          incoherenceClass: "detached_head",
+          expectedBranch: "PAP-455",
+          actualBranch: null,
+        },
+      },
+    };
+    const text = buildWorkspaceValidationRecoveryCommentText(run);
+    expect(text).toContain("(failure class detached_head)");
+    expect(text).toContain("workspace failed validation (failure class detached_head).");
+
+    // Legacy payload (no class) stays unchanged — the other SPA-6039 test
+    // covers this live; assert the pure formatter's legacy path here too.
+    const legacy = buildWorkspaceValidationRecoveryCommentText({
+      error: "fallback cwd",
+      errorCode: "workspace_validation_failed" as const,
+      resultJson: { workspaceValidation: { reason: "fallback_agent_home_cwd" } },
+    });
+    expect(legacy).not.toContain("(failure class ");
+    expect(legacy).not.toContain("failure class undefined");
+  });
+
   it("blocks before dispatch when a declared secret ref has no binding instead of emitting an opaque setup failure", async () => {
     const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
     const svc = secretService(db);

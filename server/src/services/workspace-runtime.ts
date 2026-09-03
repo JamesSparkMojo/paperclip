@@ -1079,7 +1079,7 @@ async function inspectGitWorktreeBranchIncoherence(input: {
       ? "clean worktree and expected branch points at the current HEAD"
       : canAdoptForwardActualBranch
         ? "clean worktree and checked-out branch is forward of the recorded branch"
-        : "clean detached worktree HEAD is forward of the recorded branch"
+        : "clean detached worktree HEAD will be reattached to the recorded branch (cleanliness-only gate; forward containment not proven — see SPA-6039 tech debt 2026-09-03)"
     : cleanliness !== "clean"
       ? inProgressOperation
         ? `worktree is not clean and a git ${GIT_IN_PROGRESS_OPERATION_LABELS[inProgressOperation]} is in progress`
@@ -1931,8 +1931,13 @@ export async function ensureGitWorktreeBranchCoherent(input: {
   // the card bounced. Per SPA-6039 spec: when the worktree is clean and HEAD
   // is detached, reattach via `git checkout -B <expectedBranch> HEAD` and
   // warn; dirty or not-on-remote keeps failing with class detached_head.
-  // For now the gate is cleanliness only — HEAD-on-remote is surfaced via
-  // the failure class when reattach is refused (dirty/unknown).
+  // 2026-09-03: gate is intentionally cleanliness-only. SPA-5250's rebase left
+  // HEAD diverged (amended commit, ancestryVerdict diverged) so an
+  // ancestor/origin containment gate would re-break the SPA-5250 fix. Rewind
+  // risk (clean detached HEAD behind recorded tip would move refs/heads
+  // backward via checkout -B) is accepted as low-likelihood tech debt for
+  // this scope; follow-up can add a 'not-behind' ancestry check when needed.
+  // Dirty/unknown still reject with class detached_head.
   if (
     currentBranch === null &&
     evidence.provenance.actualHeadSha &&
@@ -1977,7 +1982,7 @@ export async function ensureGitWorktreeBranchCoherent(input: {
       branchName: expectedBranchName,
       reconciledForward: false,
       warnings: [
-        `${warningPrefix} The detached HEAD contained the recorded branch plus newer commits, so Paperclip moved the recorded branch to that HEAD.`,
+        `${warningPrefix} Paperclip moved the recorded branch to that HEAD (detached HEAD was clean; forward containment not proven).`,
       ],
     };
   }

@@ -2505,6 +2505,87 @@ describe("realizeExecutionWorkspace", () => {
     await expect(readGit(repoRoot, ["rev-parse", branchName])).resolves.toBe(detachedHead);
   }, 15_000);
 
+  it("rejects a detached HEAD reattach failure with failure class detached_head", async () => {
+    // Clean detached HEAD where the recorded branch no longer resolves in the
+    // repo root (refs/heads/<branchName> deleted after the worktree was added).
+    // SPA-6039 reattach path is gated on expectedBranchExists, so a missing
+    // expected branch short-circuits to a non-eligible failure WITHOUT reaching
+    // checkout -B. Crucially incoherenceClass is set from actualBranchName ===
+    // null BEFORE the branch-exists gate, so the rejection still carries class
+    // detached_head — a deterministic way to assert the failure class without
+    // forcing a real checkout error.
+    const repoRoot = await createTempRepo();
+    const branchName = "PAP-455-detached-reattach-fail";
+    const worktreePath = path.join(repoRoot, ".paperclip", "worktrees", branchName);
+    await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+    await runGit(repoRoot, ["branch", branchName]);
+    await runGit(repoRoot, ["worktree", "add", worktreePath, branchName]);
+    await runGit(worktreePath, ["checkout", "--detach"]);
+    const detachedHead = await readGit(worktreePath, ["rev-parse", "HEAD"]);
+    await runGit(repoRoot, ["update-ref", "-d", `refs/heads/${branchName}`]);
+
+    let error: unknown = null;
+    try {
+      await ensurePersistedExecutionWorkspaceAvailable({
+        base: {
+          baseCwd: repoRoot,
+          source: "project_primary",
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+          repoUrl: null,
+          repoRef: "HEAD",
+        },
+        workspace: {
+          id: "execution-workspace-detached-reattach-fail",
+          mode: "isolated_workspace",
+          strategyType: "git_worktree",
+          cwd: worktreePath,
+          providerRef: worktreePath,
+          projectId: "project-1",
+          projectWorkspaceId: "workspace-1",
+          repoUrl: null,
+          baseRef: "HEAD",
+          branchName,
+        },
+        issue: {
+          id: "issue-detached-reattach-fail",
+          identifier: "PAP-455",
+          title: "Reject detached HEAD reattach failure (SPA-6039)",
+        },
+        agent: { id: "agent-1", name: "Codex Coder", companyId: "company-1" },
+      });
+    } catch (err) {
+      error = err;
+    }
+
+    const message = error instanceof Error ? error.message : "";
+    expect(message).toContain(`class (detached_head)`);
+    expect(message).toContain("was not completed");
+    expect(error).toMatchObject({
+      code: "workspace_validation_failed",
+      resultJson: {
+        workspaceValidation: expect.objectContaining({
+          reason: "git_worktree_branch_incoherence",
+          expectedBranch: branchName,
+          actualBranch: null,
+          incoherenceClass: "detached_head",
+          cleanliness: "clean",
+          provenance: expect.objectContaining({
+            expectedBranchExists: false,
+          }),
+          safeRepair: expect.objectContaining({
+            eligible: false,
+            attempted: false,
+            succeeded: false,
+          }),
+        }),
+      },
+    });
+    // The worktree is untouched: HEAD still detached.
+    await expect(readGit(worktreePath, ["rev-parse", "HEAD"])).resolves.toBe(detachedHead);
+    await expect(readGit(worktreePath, ["symbolic-ref", "--quiet", "--short", "HEAD"])).rejects.toThrow();
+  }, 15_000);
+
   it("rejects a dirty detached HEAD with failure class detached_head instead of reattaching", async () => {
     const repoRoot = await createTempRepo();
     const branchName = "PAP-455-dirty-detached-still-fails";

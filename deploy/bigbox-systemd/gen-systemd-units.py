@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """Generate systemd user units from captured LaunchAgent plist data.
+
 Output: one .service and (where scheduled) matching .timer per unit.
-Paths are bigbox-absolute (/home/jamesilsley). Run on laptop, scp to bigbox."""
+Paths are bigbox-absolute (/home/jamesilsley). Run on laptop, scp to bigbox.
+"""
+# Units that talk to the local Paperclip API must NOT hardcode the port. They
+# read PAPERCLIP_API_URL (and friends) from BOX_ENV_FILE via EnvironmentFile=
+# so the value is box-local: laptop default :3100, bigbox overridden (today
+# :3100, :3101 once the shadow-engine port moves). Card DoD: every script that
+# hardcodes 127.0.0.1:3100 reads PAPERCLIP_API_URL (default kept for laptop).
 import os
 OUT = os.path.dirname(os.path.abspath(__file__))
+BOX_ENV_FILE = "/home/jamesilsley/.config/paperclip/box.env"
 units = [
   dict(label="paperclip", kind="daemon",
        exec_start="/usr/bin/node /usr/lib/node_modules/paperclipai/dist/index.js run --bind tailnet",
@@ -28,11 +36,11 @@ units = [
        wd="/home/jamesilsley/.paperclip/machine-bin", out=".paperclip/dex-release-check-out.log", err=".paperclip/dex-release-check-err.log"),
   dict(label="governance-workspace-detector", kind="timer", interval=900, needs_repo=True,
        exec_start="/bin/bash /home/jamesilsley/.paperclip/bin/governance-workspace-detector.sh",
-       env={"PAPERCLIP_API_URL":"http://127.0.0.1:3100","PAPERCLIP_COMPANY_ID":"5f872702-0dc1-4a58-817c-774b614f1665"},
+       env={"PAPERCLIP_COMPANY_ID":"5f872702-0dc1-4a58-817c-774b614f1665"}, api_url=True,
        wd="/home/jamesilsley/GitHub/sparkmojo-internal", out=".paperclip/governance-detector.log", err=".paperclip/governance-detector.err.log"),
   dict(label="question-pinger", kind="timer", interval=900, needs_repo=True, imessage=True,
        exec_start="/bin/bash /home/jamesilsley/GitHub/sparkmojo-internal/platform/strategy-pipeline/monitor/bin/question-pinger.sh",
-       env={"QUESTION_PINGER_DAILY_CAP":"5","QUESTION_PINGER_OLDER_HOURS":"4","QUESTION_PINGER_PAPERCLIP_URL":"http://127.0.0.1:3100","QUESTION_PINGER_RENOTIFY_HOURS":"24"},
+       env={"QUESTION_PINGER_DAILY_CAP":"5","QUESTION_PINGER_OLDER_HOURS":"4","QUESTION_PINGER_RENOTIFY_HOURS":"24"}, api_url=True,
        out="GitHub/sparkmojo-internal/platform/strategy-pipeline/monitor/state/question-pinger.out.log", err="GitHub/sparkmojo-internal/platform/strategy-pipeline/monitor/state/question-pinger.err.log"),
   dict(label="health-monitor", kind="timer", calendar="*-*-* 09:00:00", needs_repo=True, imessage=True,
        exec_start="/bin/sh /home/jamesilsley/.sparkmojo/monitor-sync-and-run.sh /bin/bash /home/jamesilsley/.sparkmojo/monitor-main/platform/strategy-pipeline/monitor/bin/run-monitor.sh",
@@ -104,6 +112,9 @@ def svc(u):
     if u.get("keepalive"):
         lines += ["Restart=always", "RestartSec=30"]
     lines.append(f"WorkingDirectory={u.get('wd','/home/jamesilsley')}")
+    if u.get("api_url"):
+        # Box-local API URL: default :3100 (laptop) in box.env, overridden per-box.
+        lines.append(f"EnvironmentFile={BOX_ENV_FILE}")
     if u.get("env"):
         for k,v in u["env"].items():
             lines.append(f"Environment={k}={v}")

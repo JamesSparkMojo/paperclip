@@ -5,7 +5,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/home/jamesilsley/GitHub/sparkmojo-internal
-Environment=PAPERCLIP_API_URL=http://127.0.0.1:3100
+EnvironmentFile=/home/jamesilsley/.config/paperclip/box.env
 Environment=PAPERCLIP_COMPANY_ID=5f872702-0dc1-4a58-817c-774b614f1665
 ExecStart=/bin/bash /home/jamesilsley/.paperclip/bin/governance-workspace-detector.sh
 StandardOutput=append:/home/jamesilsley/.paperclip/governance-detector.log

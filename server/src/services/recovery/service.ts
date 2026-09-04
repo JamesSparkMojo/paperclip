@@ -22,6 +22,7 @@ import {
   issueAttachments,
   issueComments,
   issueApprovals,
+  issueExecutionDecisions,
   issueRecoveryActions,
   issueRelations,
   issueThreadInteractions,
@@ -42,6 +43,7 @@ import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
 import { TERMINAL_HEARTBEAT_RUN_STATUSES, issueService } from "../issues.js";
 import {
+  applyIssueExecutionPolicyTransition,
   applyIssueMonitorPolicyTransition,
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
@@ -312,23 +314,45 @@ function summarizeRunFailureForIssueComment(run: LatestIssueRun) {
   return null;
 }
 
-function buildExecutionReviewParticipantRecoveryComment(latestRun: LatestIssueRun) {
+type ReviewParticipantDiagnosticContext = {
+  stageId: string | null;
+  decisionId: string | null;
+  decisionOutcome: string | null;
+};
+
+function buildReviewParticipantDiagnosticSuffix(context?: ReviewParticipantDiagnosticContext | null): string {
+  if (!context) return "";
+  return (
+    ` Looked for decision ${context.decisionId ?? "none"} on stage ${context.stageId ?? "unknown"}` +
+    `${context.decisionOutcome ? ` (found outcome=${context.decisionOutcome})` : ""}.`
+  );
+}
+
+function buildExecutionReviewParticipantRecoveryComment(
+  latestRun: LatestIssueRun,
+  diagnosticContext?: ReviewParticipantDiagnosticContext | null,
+) {
   const failureSummary = summarizeRunFailureForIssueComment(latestRun);
   return (
     "Paperclip retried the pending execution-review participant once, but the review stage still has no completed decision " +
     `or live reviewer run.${failureSummary ?? ""} ` +
     "Moving it to `blocked` with a source-scoped recovery action so the recovery owner can repair the reviewer runtime, " +
-    "restore the review stage, or record an intentional manual resolution."
+    "restore the review stage, or record an intentional manual resolution." +
+    buildReviewParticipantDiagnosticSuffix(diagnosticContext)
   );
 }
 
-function buildExecutionReviewParticipantUnavailableComment(latestRun: LatestIssueRun) {
+function buildExecutionReviewParticipantUnavailableComment(
+  latestRun: LatestIssueRun,
+  diagnosticContext?: ReviewParticipantDiagnosticContext | null,
+) {
   const failureSummary = summarizeRunFailureForIssueComment(latestRun);
   return (
     "Paperclip cannot continue the pending execution-review participant because the participant is not invokable " +
     `and the review stage has no completed decision or live reviewer run.${failureSummary ?? ""} ` +
     "Moving it to `blocked` with a source-scoped recovery action so the recovery owner can repair the reviewer runtime, " +
-    "restore the review stage, or record an intentional manual resolution."
+    "restore the review stage, or record an intentional manual resolution." +
+    buildReviewParticipantDiagnosticSuffix(diagnosticContext)
   );
 }
 
@@ -3218,6 +3242,260 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .then((rows) => rows.map((row) => row.blockerIssueId));
   }
 
+  type PendingExecutionState = NonNullable<ReturnType<typeof parseIssueExecutionState>>;
+
+  // SPA-6055: the execution-review participant reconciler declares "no completed
+  // decision" and escalates/requeues, but it never reads issue_execution_decisions.
+  // When a reviewer records `changes_requested` (or `approved`) but the reconciler
+  // runs before the resulting in_progress transition lands, this repairs the stuck
+  // review by replaying the canonical stage transition (issue-execution-policy.ts)
+  // with the recorded decision. No new decision row is inserted — the decision
+  // already exists.
+  //
+  // NEWER-ROUND GUARD: a pending stage can legitimately coexist with a
+  // changes_requested row for the same stageId when the executor has already
+  // resubmitted and a new reviewer round is queued/started (buildPendingState at
+  // issue-execution-policy.ts:591-592 preserves lastDecisionId/lastDecisionOutcome
+  // through a re-pend). In that round-2 state we must NOT repair — the reviewer
+  // still has a live round to decide. Two signals block repair:
+  //   (a) an agentWakeupRequests row for execution_review_requested/
+  //       execution_approval_requested armed AFTER the decision row — a new
+  //       review round was armed; recovery wakes (execution_review_participant_
+  //       recovery) are noise and not counted.
+  //   (b) the reviewer's latest participant run postdates the decision — they
+  //       already started a newer round run.
+  //
+  // Returns a diagnostic describing the looked-for decision when no repair was
+  // applied (so the downstream escalation comment names the stage/decision).
+  async function maybeRepairStuckReviewDecision(input: {
+    issue: typeof issues.$inferSelect;
+    pendingExecutionState: PendingExecutionState;
+    participantAgentId: string;
+    participantLatestRun: LatestIssueRun;
+  }): Promise<{ repaired: boolean; diagnostic: ReviewParticipantDiagnosticContext | null }> {
+    const { issue, pendingExecutionState, participantAgentId, participantLatestRun } = input;
+    const stageId = pendingExecutionState.currentStageId ?? null;
+    const diagnosticNoDecision: ReviewParticipantDiagnosticContext = {
+      stageId,
+      decisionId: null,
+      decisionOutcome: null,
+    };
+
+    if (!stageId) {
+      return { repaired: false, diagnostic: diagnosticNoDecision };
+    }
+
+    // 1. Newest decision row for this stage.
+    const [decision] = await db
+      .select({
+        id: issueExecutionDecisions.id,
+        stageId: issueExecutionDecisions.stageId,
+        stageType: issueExecutionDecisions.stageType,
+        outcome: issueExecutionDecisions.outcome,
+        body: issueExecutionDecisions.body,
+        createdAt: issueExecutionDecisions.createdAt,
+        createdByRunId: issueExecutionDecisions.createdByRunId,
+      })
+      .from(issueExecutionDecisions)
+      .where(
+        and(
+          eq(issueExecutionDecisions.companyId, issue.companyId),
+          eq(issueExecutionDecisions.issueId, issue.id),
+          eq(issueExecutionDecisions.stageId, stageId),
+        ),
+      )
+      .orderBy(desc(issueExecutionDecisions.createdAt), desc(issueExecutionDecisions.id))
+      .limit(1);
+    if (!decision) {
+      return { repaired: false, diagnostic: diagnosticNoDecision };
+    }
+
+    const diagnostic: ReviewParticipantDiagnosticContext = {
+      stageId: decision.stageId,
+      decisionId: decision.id,
+      decisionOutcome: decision.outcome,
+    };
+
+    // 2. Only act on decisions the policy transition knows how to apply.
+    if (decision.outcome !== "changes_requested" && decision.outcome !== "approved") {
+      return { repaired: false, diagnostic };
+    }
+
+    // 3a. Newer-round guard: a fresh review round was armed after this decision
+    //     (agentWakeupRequests.reason is a top-level column; payload holds issueId).
+    const [newerRoundWake] = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.companyId, issue.companyId),
+          eq(agentWakeupRequests.agentId, participantAgentId),
+          sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+          inArray(agentWakeupRequests.reason, ["execution_review_requested", "execution_approval_requested"]),
+          gt(agentWakeupRequests.requestedAt, decision.createdAt),
+        ),
+      )
+      .limit(1);
+    if (newerRoundWake) {
+      return { repaired: false, diagnostic };
+    }
+
+    // 3b. Newer-round guard: the reviewer already started a newer round run.
+    if (participantLatestRun) {
+      const runStartedAt = participantLatestRun.startedAt ?? participantLatestRun.createdAt;
+      if (runStartedAt && runStartedAt.getTime() > decision.createdAt.getTime()) {
+        return { repaired: false, diagnostic };
+      }
+    }
+
+    // 4. Replay the canonical stage transition as the reviewer who decided, so
+    //    the principalsEqual(currentParticipant, actor) branch at
+    //    issue-execution-policy.ts:786/879 accepts it. requestedStatus "done"
+    //    routes through the approve branch; anything else ("in_progress") routes
+    //    through the request-changes branch.
+    const requestedStatus = decision.outcome === "approved" ? "done" : "in_progress";
+    const transition = applyIssueExecutionPolicyTransition({
+      issue,
+      policy: normalizeIssueExecutionPolicy(issue.executionPolicy ?? null),
+      requestedStatus,
+      requestedAssigneePatch: {},
+      actor: {
+        agentId: pendingExecutionState.currentParticipant?.agentId ?? null,
+        userId: pendingExecutionState.currentParticipant?.userId ?? null,
+      },
+      commentBody: decision.body,
+    });
+
+    // 4b. No effective transition -> fall through to the existing escalation.
+    if (transition.patch.executionState === undefined) {
+      return { repaired: false, diagnostic };
+    }
+
+    // 5. Build the issue update patch. For the approved case the transition
+    //    routes to a "completed" executionState; mirror the route behavior where
+    //    requestedStatus flows through as the issue status when the policy
+    //    doesn't re-pend a next stage (routes/issues.ts:8768).
+    const patch: Record<string, unknown> = { ...transition.patch };
+    if (decision.outcome === "approved") {
+      const nextState = parseIssueExecutionState(
+        transition.patch.executionState !== undefined
+          ? (transition.patch.executionState as Record<string, unknown> | null)
+          : null,
+      );
+      if (patch.status === undefined && (nextState === null || nextState?.status === "completed")) {
+        patch.status = "done";
+      }
+    }
+
+    const updated = await issuesSvc.update(issue.id, patch);
+    if (!updated) {
+      return { repaired: false, diagnostic };
+    }
+
+    // 6. Best-effort wake of the next actor (mirrors buildExecutionStageWakeup
+    //    semantics at routes/issues.ts:2154). Do NOT import that function; inline
+    //    the minimal version here. Never let a wake failure unwind the repair.
+    try {
+      const nextStateForWake = parseIssueExecutionState(
+        transition.patch.executionState !== undefined
+          ? (transition.patch.executionState as Record<string, unknown> | null)
+          : null,
+      );
+      const baseExecutionStage = {
+        wakeRole: nextStateForWake?.currentStageType === "approval" ? "approver" : "reviewer",
+        stageId: nextStateForWake?.currentStageId ?? pendingExecutionState.currentStageId,
+        stageType: nextStateForWake?.currentStageType ?? pendingExecutionState.currentStageType,
+        currentParticipant: nextStateForWake?.currentParticipant ?? pendingExecutionState.currentParticipant,
+        returnAssignee: nextStateForWake?.returnAssignee ?? pendingExecutionState.returnAssignee,
+        reviewRequest: nextStateForWake?.reviewRequest ?? pendingExecutionState.reviewRequest ?? null,
+        lastDecisionOutcome: nextStateForWake?.lastDecisionOutcome ?? pendingExecutionState.lastDecisionOutcome,
+      };
+
+      if (nextStateForWake?.status === "changes_requested") {
+        const returnAssigneeAgentId = nextStateForWake.returnAssignee?.type === "agent"
+          ? (nextStateForWake.returnAssignee.agentId ?? null)
+          : null;
+        if (returnAssigneeAgentId) {
+          const stageCtx = { ...baseExecutionStage, allowedActions: ["address_changes", "resubmit"] };
+          await deps.enqueueWakeup(returnAssigneeAgentId, {
+            source: "assignment",
+            triggerDetail: "system",
+            reason: "execution_changes_requested",
+            payload: { issueId: issue.id, mutation: "update", executionStage: stageCtx },
+            requestedByActorType: "system",
+            requestedByActorId: null,
+            contextSnapshot: {
+              issueId: issue.id,
+              taskId: issue.id,
+              wakeReason: "execution_changes_requested",
+              source: "issue.execution_stage",
+              executionStage: stageCtx,
+            },
+          });
+        }
+      } else if (nextStateForWake?.status === "pending") {
+        const nextParticipantAgentId = nextStateForWake.currentParticipant?.type === "agent"
+          ? (nextStateForWake.currentParticipant.agentId ?? null)
+          : null;
+        if (nextParticipantAgentId) {
+          const reason = nextStateForWake.currentStageType === "approval"
+            ? "execution_approval_requested"
+            : "execution_review_requested";
+          const stageCtx = {
+            ...baseExecutionStage,
+            allowedActions: ["approve", "request_changes"],
+          };
+          await deps.enqueueWakeup(nextParticipantAgentId, {
+            source: "assignment",
+            triggerDetail: "system",
+            reason,
+            payload: { issueId: issue.id, mutation: "update", executionStage: stageCtx },
+            requestedByActorType: "system",
+            requestedByActorId: null,
+            contextSnapshot: {
+              issueId: issue.id,
+              taskId: issue.id,
+              wakeReason: reason,
+              source: "issue.execution_stage",
+              executionStage: stageCtx,
+            },
+          });
+        }
+      } else if (nextStateForWake?.status === "completed") {
+        // Terminal: no wake needed — the issue is done or the patch made the
+        // state null.
+      }
+    } catch (err) {
+      // Best-effort: never let a wake failure unwind the repair.
+      logger.warn(
+        { err, issueId: issue.id, decisionId: decision.id },
+        "recovery: maybeRepairStuckReviewDecision wakeup failed (repair applied)",
+      );
+    }
+
+    // 7. Audit record of the repair.
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: null,
+      runId: null,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        identifier: issue.identifier,
+        source: "recovery.reconcile_execution_review_participant",
+        repairedDecisionId: decision.id,
+        decisionOutcome: decision.outcome,
+        stageId: decision.stageId,
+        repairedStatus: (patch.status as string | undefined) ?? issue.status,
+      },
+    });
+
+    return { repaired: true, diagnostic };
+  }
+
   async function existingUnresolvedBlockerIssues(companyId: string, issueId: string) {
     return db
       .select({ id: issueRelations.issueId, identifier: issues.identifier })
@@ -3666,6 +3944,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       orphanBlockersAssigned: 0,
       successfulRunHandoffEscalated: 0,
       reviewParticipantRequeued: 0,
+      reviewParticipantRepaired: 0,
       escalated: 0,
       waitingOnReviewResolved: 0,
       providerQuotaMonitored: 0,
@@ -3901,13 +4180,33 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         }
         const participantLatestRun = participantLatestRunForRecovery;
 
+        // SPA-6055: before escalating/requeueing, consult issue_execution_decisions
+        // for this stage. A recorded changes_requested (or approved) decision with a
+        // still-pending executionState means the decision landed after the reviewer
+        // ran — replay the canonical transition to repair the card instead of
+        // blocking it. Newer-round guards inside the helper prevent the misfire
+        // where a pending stage legitimately coexists with an older round's
+        // changes_requested row.
+        const decisionRepair = await maybeRepairStuckReviewDecision({
+          issue,
+          pendingExecutionState,
+          participantAgentId,
+          participantLatestRun,
+        });
+        const reviewDiagnostic = decisionRepair.diagnostic ?? null;
+        if (decisionRepair.repaired) {
+          result.reviewParticipantRepaired += 1;
+          result.issueIds.push(issue.id);
+          continue;
+        }
+
         if (!participantLatestRun || !isTerminalIssueRun(participantLatestRun)) {
           if (!agentInvokable) {
             const updated = await escalateStrandedAssignedIssue({
               issue,
               previousStatus: "in_review",
               latestRun: participantLatestRun,
-              comment: buildExecutionReviewParticipantUnavailableComment(participantLatestRun),
+              comment: buildExecutionReviewParticipantUnavailableComment(participantLatestRun, reviewDiagnostic),
               recoveryCause: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
               recoveryOwnerAgentId: participantAgentId,
             });
@@ -3974,7 +4273,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             issue,
             previousStatus: "in_review",
             latestRun: participantLatestRun,
-            comment: buildExecutionReviewParticipantUnavailableComment(participantLatestRun),
+            comment: buildExecutionReviewParticipantUnavailableComment(participantLatestRun, reviewDiagnostic),
             recoveryCause: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
             recoveryOwnerAgentId: participantAgentId,
           });
@@ -3992,7 +4291,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             issue,
             previousStatus: "in_review",
             latestRun: participantLatestRun,
-            comment: buildExecutionReviewParticipantRecoveryComment(participantLatestRun),
+            comment: buildExecutionReviewParticipantRecoveryComment(participantLatestRun, reviewDiagnostic),
             recoveryCause: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
             recoveryOwnerAgentId: participantAgentId,
           });
@@ -4025,6 +4324,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           extraContext: {
             currentStageId: pendingExecutionState.currentStageId ?? null,
             currentStageType: pendingExecutionState.currentStageType ?? null,
+            ...(reviewDiagnostic?.decisionId
+              ? {
+                  lastDecisionId: reviewDiagnostic.decisionId,
+                  lastDecisionOutcome: reviewDiagnostic.decisionOutcome,
+                }
+              : {}),
             reviewRecoveryInstruction:
               "The previous reviewer run ended while this execution-review stage was still pending. Submit the review decision now, or mark the issue blocked with the exact unblock action.",
           },

@@ -3,6 +3,7 @@ export { buildReceipts } from "./build_receipts.js";
 export { buildReceiptSigningKeys } from "./build_receipt_signing_keys.js";
 export { companyLogos } from "./company_logos.js";
 export { authUsers, authSessions, authAccounts, authVerifications } from "./auth.js";
+export { deployLeases, builderFences } from "./concurrency_fences.js";
 export { instanceSettings } from "./instance_settings.js";
 export { instanceUserRoles } from "./instance_user_roles.js";
 export { userSidebarPreferences } from "./user_sidebar_preferences.js";

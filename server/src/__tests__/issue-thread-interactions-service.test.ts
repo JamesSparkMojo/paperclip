@@ -1226,26 +1226,30 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     const older = await interactionsSvc.create({ id: issueId, companyId }, {
       kind: "request_confirmation",
       idempotencyKey: "confirmation:first:older",
-      payload: { version: 1, prompt: "Approve the older draft?" },
+      payload: { version: 1, prompt: "Approve the older draft?", detailsMarkdown: "Option A — approve: lands the change as drafted. Option B — request changes: returns the draft for another pass. Recommended default: A (approve). If the board stays silent by 2026-09-05 17:00, A proceeds." },
     }, { agentId: firstAgentId });
     const otherKind = await interactionsSvc.create({ id: issueId, companyId }, {
       kind: "request_checkbox_confirmation",
       idempotencyKey: "checkbox:first",
       payload: {
         version: 1,
-        prompt: "Select regions",
-        options: [{ id: "us", label: "US" }],
+        prompt: "Select regions. Impact: US-only limits the first rollout to one region; EU adds onboarding lead time.",
+        options: [
+          { id: "us", label: "US", description: "US region only. Recommended default." },
+          { id: "eu", label: "EU" },
+        ],
+        detailsMarkdown: "Recommended default: US. If the board stays silent by 2026-09-05 17:00, US is selected.",
       },
     }, { agentId: firstAgentId });
     const otherAgent = await interactionsSvc.create({ id: issueId, companyId }, {
       kind: "request_confirmation",
       idempotencyKey: "confirmation:second",
-      payload: { version: 1, prompt: "Approve the second agent's draft?" },
+      payload: { version: 1, prompt: "Approve the second agent's draft?", detailsMarkdown: "Option A — approve: lands the change as drafted. Option B — request changes: returns the draft for another pass. Recommended default: A (approve). If the board stays silent by 2026-09-05 17:00, A proceeds." },
     }, { agentId: secondAgentId });
     const replacement = await interactionsSvc.create({ id: issueId, companyId }, {
       kind: "request_confirmation",
       idempotencyKey: "confirmation:first:newer",
-      payload: { version: 1, prompt: "Approve the newer draft?" },
+      payload: { version: 1, prompt: "Approve the newer draft?", detailsMarkdown: "Option A — approve: lands the change as drafted. Option B — request changes: returns the draft for another pass. Recommended default: A (approve). If the board stays silent by 2026-09-05 17:00, A proceeds." },
     }, { agentId: firstAgentId });
 
     const interactions = await interactionsSvc.listForIssue(issueId);
@@ -1380,6 +1384,108 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       .from(issueThreadInteractions)
       .where(eq(issueThreadInteractions.issueId, issueId));
     expect(rows).toHaveLength(0);
+  });
+
+  it("rejects an agent-created board-only wait-shaped confirmation with a 422 (SPA-6051)", async () => {
+    const companyId = randomUUID();
+    const goalId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+    await db.insert(goals).values({
+      id: goalId,
+      companyId,
+      title: "Decision shape",
+      level: "task",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      goalId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    const agentId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Builder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    // SPA-6006 evidence, verbatim from interaction 9b4e96b1-dd8f-497c-bd8b-49b6ab59b108.
+    await expect(interactionsSvc.create({
+      id: issueId,
+      companyId,
+    }, {
+      kind: "request_confirmation",
+      continuationPolicy: "none",
+      payload: {
+        version: 1,
+        prompt: "Codex review pending on PR #27 head a0b804012 — SPA-6006 fix (recovery backoff + workspace-inheritance disable + explicit-null clear). Gate history: 21/21 SUCCESS.",
+        allowDeclineReason: true,
+        supersedeOnUserComment: true,
+      },
+    }, {
+      agentId,
+      runId: randomUUID(),
+    })).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("executionPolicy.monitor"),
+    });
+
+    const sameShaped = await interactionsSvc.create({
+      id: issueId,
+      companyId,
+    }, {
+      kind: "request_confirmation",
+      continuationPolicy: "none",
+      payload: {
+        version: 1,
+        prompt: "Promote the engine release to the staging fleet?",
+        detailsMarkdown: [
+          "Option A — promote now: unblocks Willow UAT tomorrow.",
+          "Option B — hold one day: keeps staging off the open migration window.",
+          "Recommended default: A (promote now).",
+          "If the board stays silent by 2026-09-05 17:00, we proceed with A.",
+        ].join("\n"),
+      },
+    }, {
+      agentId,
+      runId: randomUUID(),
+    });
+    expect(sameShaped.status).toBe("pending");
+
+    // The same wait-shaped ask from the board actor keeps its current latitude.
+    const boardCreated = await interactionsSvc.create({
+      id: issueId,
+      companyId,
+    }, {
+      kind: "request_confirmation",
+      continuationPolicy: "none",
+      payload: {
+        version: 1,
+        prompt: "Codex review pending on PR #27 head a0b804012 — SPA-6006 fix (recovery backoff + workspace-inheritance disable + explicit-null clear). Gate history: 21/21 SUCCESS.",
+        allowDeclineReason: true,
+      },
+    }, {
+      userId: "local-board",
+    });
+    expect(boardCreated.status).toBe("pending");
   });
 
   it("accepts request_confirmation interactions without creating child issues", async () => {
@@ -2030,6 +2136,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
         prompt: "Approve this plan?",
         acceptLabel: "Approve plan",
         rejectLabel: "Ask for changes",
+        detailsMarkdown: "Option A — approve: the plan proceeds to execution. Option B — ask for changes: the plan returns to drafting. Recommended default: A (approve). If the board stays silent by 2026-09-05 17:00, A proceeds.",
       },
     }, {
       agentId,
@@ -2077,6 +2184,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       payload: {
         version: 1,
         prompt: "Approve the next step?",
+        detailsMarkdown: "Option A — approve: the reviewed work resumes with the next step. Option B — request changes: the work returns to the builder. Recommended default: A (approve). If the board stays silent by 2026-09-05 17:00, A proceeds.",
       },
     }, {
       agentId,
@@ -2120,6 +2228,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       payload: {
         version: 1,
         prompt: "Approve while work is active?",
+        detailsMarkdown: "Option A — approve: the work proceeds as drafted. Option B — request changes: the work returns for another pass. Recommended default: A (approve). If the board stays silent by 2026-09-05 17:00, A proceeds.",
       },
     }, {
       agentId,

@@ -56,6 +56,7 @@ import {
 } from "@paperclipai/shared";
 import { z } from "zod";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
+import { evaluateBoardOnlyDecisionShape } from "./interaction-decision-shape.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { logActivity } from "./activity-log.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
@@ -1757,6 +1758,27 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
         hasToolAction: data.kind === "request_confirmation" && data.payload.toolAction !== undefined,
       });
       const normalizedData = { ...data, resolverPolicy: policy.requestedResolverPolicy };
+
+      // SPA-6051: agent-created board-only confirmations must carry the
+      // machine-law-16 decision shape (ELI5, options + impact, recommended
+      // default, silence consequence with a date). Wait-shaped asks — Patti's
+      // "Codex review pending on PR #27" (SPA-6006) reached James's decisions
+      // feed — are rejected here, after governance resolution, so the gate
+      // sees the effective board_only path. Board-created asks keep their
+      // current latitude; plan/document targets keep the approval flow.
+      if (
+        actor.agentId
+        && policy.effectiveResolverPolicy === "board_only"
+        && (data.kind === "request_confirmation" || data.kind === "request_checkbox_confirmation")
+      ) {
+        const decisionShapeError = evaluateBoardOnlyDecisionShape({
+          kind: data.kind,
+          payload: data.payload,
+        });
+        if (decisionShapeError) {
+          throw unprocessable(decisionShapeError.message, decisionShapeError.details);
+        }
+      }
 
       if (normalizedData.addresseeAgentId) {
         if (normalizedData.addresseeAgentId === actor.agentId) {

@@ -1414,4 +1414,188 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
 
     expect(result.findings).toBe(0);
   });
+
+  // SPA-6006 R1 oracle: when the recovery issue holds an execution_workspace_id
+  // that is already claimed by an OPEN sibling issue, the new escalation INSERT
+  // must NOT inherit that workspace (which would trip the partial unique index
+  // and retry forever). The escalation must succeed and the parent must keep
+  // its workspace.
+  it("does not inherit a held execution_workspace_id when creating a liveness escalation", async () => {
+    await enableAutoRecovery();
+    const { companyId, managerId, blockedIssueId, blockerIssueId } = await seedBlockedChain();
+    const executionWorkspaceId = randomUUID();
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+
+    // Wire the recovery (blocker) issue + an OPEN sibling both into the same
+    // execution workspace — the precondition for the partial unique collision.
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "SPA-6006 workspace-sharing project",
+      status: "in_progress",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "SPA-6006 workspace",
+      sourceType: "git_worktree",
+    });
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "SPA-6006 held execution workspace",
+      providerType: "git_worktree",
+    });
+
+    // The recovery (blocker) issue still owns the workspace (open).
+    await db
+      .update(issues)
+      .set({ executionWorkspaceId, projectId })
+      .where(eq(issues.id, blockerIssueId));
+
+    // And a separate OPEN sibling already holds the same workspace — this is
+    // the precondition that previously tripped the partial unique index.
+    const siblingOpenIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: siblingOpenIssueId,
+      companyId,
+      projectId,
+      title: "Open sibling that already holds the workspace",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: managerId,
+      executionWorkspaceId,
+      issueNumber: 99,
+      identifier: `${`S${companyId.replace(/-/g, "").slice(0, 4)}`}-99`,
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileIssueGraphLiveness();
+
+    expect(result.escalationsCreated).toBe(1);
+
+    // The recovery (blocker) issue keeps its workspace.
+    const blockerAfter = await db
+      .select({ executionWorkspaceId: issues.executionWorkspaceId })
+      .from(issues)
+      .where(eq(issues.id, blockerIssueId))
+      .then((rows) => rows[0] ?? null);
+    expect(blockerAfter?.executionWorkspaceId).toBe(executionWorkspaceId);
+
+    // The new escalation must NOT have inherited that workspace.
+    const escalations = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "harness_liveness_escalation")));
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0]).toMatchObject({
+      parentId: blockerIssueId,
+      executionWorkspaceId: null,
+    });
+    expect(escalations[0]?.assigneeAgentId).toBeTruthy();
+    // Defensive cross-link: the blocker is still the recovery issue and the
+    // newly blocked issue is the originally blocked one.
+    expect(escalations[0]?.id).not.toBe(siblingOpenIssueId);
+    expect(blockedIssueId).not.toBe(siblingOpenIssueId);
+  });
+
+  // SPA-6006 R2 oracle: a failed incident INSERT must not invoke any agent
+  // heartbeat. We force the INSERT to throw with a non-raced-recovery error
+  // (FK violation) by removing the parent (recovery) issue out from under
+  // the escalation insert.
+  it("does not invoke any agent heartbeat when the liveness escalation INSERT throws", async () => {
+    await enableAutoRecovery();
+    const { companyId, blockedIssueId, blockerIssueId } = await seedBlockedChain();
+
+    // First reconciliation succeeds and creates an escalation. Then we close
+    // the escalation and remove the parent blocker issue (cascading relations
+    // first) so the next reconciliation will fail to insert a new escalation
+    // because parentId references a missing row.
+    const heartbeat = heartbeatService(db);
+    const first = await heartbeat.reconcileIssueGraphLiveness();
+    expect(first.escalationsCreated).toBe(1);
+
+    const createdEscalations = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "harness_liveness_escalation")));
+    expect(createdEscalations).toHaveLength(1);
+    await db
+      .update(issues)
+      .set({ status: "done" })
+      .where(eq(issues.id, createdEscalations[0]!.id));
+    await db.delete(issueRelations).where(eq(issueRelations.issueId, blockerIssueId));
+    await db.delete(issueRelations).where(eq(issueRelations.relatedIssueId, blockerIssueId));
+    await db.update(issues).set({ parentId: null }).where(eq(issues.parentId, blockerIssueId));
+    await db.delete(issues).where(eq(issues.id, blockerIssueId));
+
+    const wakesBefore = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+
+    const result = await heartbeat.reconcileIssueGraphLiveness();
+    expect(result.escalationsCreated).toBe(0);
+
+    const wakesAfter = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    // No new wake may fire when the escalation INSERT throws.
+    expect(wakesAfter.length).toBe(wakesBefore.length);
+
+    // Sanity: the same incident never created a partial row.
+    const escalations = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "harness_liveness_escalation")));
+    expect(escalations).toHaveLength(1);
+    expect(blockedIssueId).not.toBe(blockerIssueId);
+  });
+
+  // SPA-6006 R3 oracle: a successful first reconciliation creates the escalation
+// + wake. Subsequent reconciliations must not stack additional wakes on top
+// of the same incident key (R1+R3 combined). Drive 10 ticks and assert no
+// new wake fires after the first.
+  it("backs off on repeated identical liveness escalation outcomes (no new wake for 10 ticks)", async () => {
+    await enableAutoRecovery();
+    const { companyId } = await seedBlockedChain({
+      blockerStatus: "backlog",
+      blockerAssigneeAgentId: "coder",
+    });
+    const heartbeat = heartbeatService(db);
+
+    // First reconcile creates the escalation + fires the initial wake. After
+    // that, every subsequent reconcile must see the existing escalation and
+    // not fire another wake.
+    const first = await heartbeat.reconcileIssueGraphLiveness();
+    expect(first.escalationsCreated).toBe(1);
+
+    const wakesBefore = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+
+    // Drive 10 follow-up ticks. None must fire a new wake, none must create a
+    // new escalation, and none must error.
+    for (let i = 0; i < 10; i += 1) {
+      const r = await heartbeat.reconcileIssueGraphLiveness();
+      expect(r.escalationsCreated).toBe(0);
+    }
+
+    const wakesAfter = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+
+    // The core SPA-6006 oracle: zero new wake rows across 10 follow-up ticks.
+    // Pre-fix, every tick woke the assignee.
+    expect(wakesAfter.length).toBe(wakesBefore.length);
+  });
 });

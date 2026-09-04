@@ -7466,9 +7466,19 @@ export function issueService(db: Db) {
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
-        delete issueData.executionWorkspaceId;
-        delete issueData.executionWorkspacePreference;
-        delete issueData.executionWorkspaceSettings;
+        // SPA-6006: an explicit null must still clear the workspace linkage —
+        // the board-side workaround for a wedged execution_workspace_id is
+        // exactly that PATCH, and silently dropping it (200 + no-op) forces a
+        // direct DB write. Only non-null values stay gated behind the flag.
+        const explicitWorkspaceClear =
+          issueData.executionWorkspaceId === null ||
+          issueData.executionWorkspacePreference === null ||
+          issueData.executionWorkspaceSettings === null;
+        if (!explicitWorkspaceClear) {
+          delete issueData.executionWorkspaceId;
+          delete issueData.executionWorkspacePreference;
+          delete issueData.executionWorkspaceSettings;
+        }
       }
 
       if (issueData.status) {

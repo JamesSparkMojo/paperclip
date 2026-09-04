@@ -3,9 +3,7 @@ Description=process-team-wake (bigbox)
 After=network-online.target
 
 [Service]
-Type=simple
 Type=oneshot
-RestartSec=30
 WorkingDirectory=/home/jamesilsley
 ExecStart=/bin/bash /home/jamesilsley/Library/LaunchAgents/process-team-wake.sh
 StandardOutput=append:/home/jamesilsley//tmp/process-team.log

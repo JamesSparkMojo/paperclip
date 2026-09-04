@@ -3,9 +3,7 @@ Description=claude-memory-mirror (bigbox)
 After=network-online.target
 
 [Service]
-Type=simple
 Type=oneshot
-RestartSec=30
 WorkingDirectory=/home/jamesilsley
 ExecStart=/bin/bash /home/jamesilsley/.gbrain/claude-memory-mirror.sh
 StandardOutput=append:/home/jamesilsley/.gbrain/claude-memory-mirror.log

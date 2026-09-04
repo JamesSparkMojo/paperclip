@@ -98,9 +98,12 @@ units = [
 ]
 
 def svc(u):
-    lines = ["[Unit]", f"Description={u['label']} (bigbox)", "After=network-online.target", "", "[Service]", "Type=simple",
-             "Restart=always" if u.get("keepalive") else "Type=oneshot",
-             "RestartSec=30", f"WorkingDirectory={u.get('wd','/home/jamesilsley')}"]
+    oneshot = not u.get("keepalive")
+    lines = ["[Unit]", f"Description={u['label']} (bigbox)", "After=network-online.target", "", "[Service]",
+             "Type=oneshot" if oneshot else "Type=simple"]
+    if u.get("keepalive"):
+        lines += ["Restart=always", "RestartSec=30"]
+    lines.append(f"WorkingDirectory={u.get('wd','/home/jamesilsley')}")
     if u.get("env"):
         for k,v in u["env"].items():
             lines.append(f"Environment={k}={v}")

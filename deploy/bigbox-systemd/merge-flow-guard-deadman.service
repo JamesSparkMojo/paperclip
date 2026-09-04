@@ -3,9 +3,7 @@ Description=merge-flow-guard-deadman (bigbox)
 After=network-online.target
 
 [Service]
-Type=simple
 Type=oneshot
-RestartSec=30
 WorkingDirectory=/home/jamesilsley/.sparkmojo
 ExecStart=/usr/bin/python3 /home/jamesilsley/.sparkmojo/bin/guard-deadman.py
 StandardOutput=append:/home/jamesilsley/.sparkmojo/merge-flow/guard-deadman-out.log

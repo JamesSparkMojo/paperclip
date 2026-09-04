@@ -3,9 +3,7 @@ Description=gbrain-sync-reaper (bigbox)
 After=network-online.target
 
 [Service]
-Type=simple
 Type=oneshot
-RestartSec=30
 WorkingDirectory=/home/jamesilsley
 ExecStart=/bin/bash /home/jamesilsley/GitHub/sparkmojo-internal/platform/strategy-pipeline/monitor/bin/gbrain-sync-reaper.sh
 StandardOutput=append:/home/jamesilsley//dev/null

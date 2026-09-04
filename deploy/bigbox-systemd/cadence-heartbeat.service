@@ -3,9 +3,7 @@ Description=cadence-heartbeat (bigbox)
 After=network-online.target
 
 [Service]
-Type=simple
 Type=oneshot
-RestartSec=30
 WorkingDirectory=/home/jamesilsley
 ExecStart=/bin/bash /home/jamesilsley/GitHub/sparkmojo-internal/platform/strategy-pipeline/scheduler/bin/gate.sh
 StandardOutput=append:/home/jamesilsley/GitHub/sparkmojo-internal/platform/strategy-pipeline/scheduler/state/launchd-heartbeat.out.log

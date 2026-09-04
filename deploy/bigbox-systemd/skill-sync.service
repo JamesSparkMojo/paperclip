@@ -3,9 +3,7 @@ Description=skill-sync (bigbox)
 After=network-online.target
 
 [Service]
-Type=simple
 Type=oneshot
-RestartSec=30
 WorkingDirectory=/home/jamesilsley
 Environment=SPARKMOJO_REPO=/home/jamesilsley/GitHub/sparkmojo-internal
 ExecStart=/bin/bash /home/jamesilsley/GitHub/sparkmojo-internal/skills/runner-sync-skills.sh

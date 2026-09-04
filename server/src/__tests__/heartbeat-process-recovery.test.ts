@@ -30,6 +30,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
+  issueExecutionDecisions,
   issuePlanDecompositions,
   issueRecoveryActions,
   issueRelations,
@@ -4804,6 +4805,405 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       latestRunErrorCode: "adapter_failed",
       recoveryCause: "execution_review_participant_recovery",
     });
+  });
+
+  it("completes a changes_requested decision the reconciler finds stranded on a pending review stage", async () => {
+    const { companyId, agentId, issueId, runId, wakeupRequestId, stageId } =
+      await seedInReviewParticipantRunFixture();
+    const executorId = randomUUID();
+    const decisionId = randomUUID();
+    const finishedAt = new Date("2026-03-19T00:05:00.000Z");
+    const decisionCreatedAt = new Date("2026-03-19T00:01:00.000Z");
+
+    await db.insert(agents).values({
+      id: executorId,
+      companyId,
+      name: "CodexImplementor",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.update(issues).set({
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId, userId: null },
+        returnAssignee: { type: "agent", agentId: executorId, userId: null },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: decisionId,
+        lastDecisionOutcome: "changes_requested",
+      },
+      executionPolicy: {
+        mode: "normal",
+        commentRequired: true,
+        stages: [{
+          id: stageId,
+          type: "review",
+          participants: [{ type: "agent", agentId, userId: null }],
+          approvalsNeeded: 1,
+        }],
+      },
+    }).where(eq(issues.id, issueId));
+
+    await db.insert(issueExecutionDecisions).values({
+      id: decisionId,
+      companyId,
+      issueId,
+      stageId,
+      stageType: "review",
+      actorAgentId: agentId,
+      actorUserId: null,
+      outcome: "changes_requested",
+      body: "request changes: fix the flaky test",
+      createdByRunId: runId,
+      createdAt: decisionCreatedAt,
+      updatedAt: decisionCreatedAt,
+    });
+
+    await db.update(heartbeatRuns).set({
+      status: "failed",
+      startedAt: new Date("2026-03-19T00:00:00.000Z"),
+      finishedAt,
+      updatedAt: finishedAt,
+      errorCode: "adapter_failed",
+      error: "review run failed before the decision could drive the transition",
+    }).where(eq(heartbeatRuns.id, runId));
+    await db.update(agentWakeupRequests).set({
+      status: "failed",
+      claimedAt: new Date("2026-03-19T00:00:00.000Z"),
+      finishedAt,
+      updatedAt: finishedAt,
+      error: "review run failed before the decision could drive the transition",
+    }).where(eq(agentWakeupRequests.id, wakeupRequestId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(result.reviewParticipantRepaired).toBe(1);
+    expect(result.escalated).toBe(0);
+    expect(result.reviewParticipantRequeued).toBe(0);
+    expect(result.issueIds).toEqual([issueId]);
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_progress");
+    expect(issue?.assigneeAgentId).toBe(executorId);
+    expect(issue?.executionState).toMatchObject({
+      status: "changes_requested",
+      lastDecisionId: decisionId,
+      lastDecisionOutcome: "changes_requested",
+    });
+    expect((issue?.executionState as Record<string, unknown> | null)?.returnAssignee).toEqual({
+      type: "agent",
+      agentId: executorId,
+      userId: null,
+    });
+
+    const executorWakes = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, executorId));
+    expect(executorWakes.some((row) => row.reason === "execution_changes_requested")).toBe(true);
+
+    const repairActivities = await db
+      .select()
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.entityId, issueId),
+          sql`${activityLog.details} ->> 'source' = 'recovery.reconcile_execution_review_participant'`,
+        ),
+      );
+    expect(repairActivities.length).toBeGreaterThan(0);
+    expect(repairActivities.some((row) =>
+      (row.details as Record<string, unknown> | null)?.repairedDecisionId === decisionId,
+    )).toBe(true);
+
+    const recoveryActions = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId));
+    expect(recoveryActions).toHaveLength(0);
+    expect(issue?.status).not.toBe("blocked");
+  });
+
+  it("keeps blocking a pending review stage with no recorded decision", async () => {
+    const { companyId, agentId, issueId, runId, wakeupRequestId, stageId } =
+      await seedInReviewParticipantRunFixture();
+    const executorId = randomUUID();
+    const finishedAt = new Date("2026-03-19T00:05:00.000Z");
+
+    await db.insert(agents).values({
+      id: executorId,
+      companyId,
+      name: "CodexImplementor",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.update(issues).set({
+      assigneeAgentId: agentId,
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId, userId: null },
+        returnAssignee: { type: "agent", agentId: executorId, userId: null },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+      executionPolicy: {
+        mode: "normal",
+        commentRequired: true,
+        stages: [{
+          id: stageId,
+          type: "review",
+          participants: [{ type: "agent", agentId, userId: null }],
+          approvalsNeeded: 1,
+        }],
+      },
+    }).where(eq(issues.id, issueId));
+
+    await db.update(heartbeatRuns).set({
+      status: "failed",
+      startedAt: new Date("2026-03-19T00:00:00.000Z"),
+      finishedAt,
+      updatedAt: finishedAt,
+      errorCode: "adapter_failed",
+      error: "review run failed without a decision",
+    }).where(eq(heartbeatRuns.id, runId));
+    await db.update(agentWakeupRequests).set({
+      status: "failed",
+      claimedAt: new Date("2026-03-19T00:00:00.000Z"),
+      finishedAt,
+      updatedAt: finishedAt,
+      error: "review run failed without a decision",
+    }).where(eq(agentWakeupRequests.id, wakeupRequestId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(result.reviewParticipantRepaired).toBe(0);
+    expect(result.reviewParticipantRequeued).toBe(1);
+    expect(result.escalated).toBe(0);
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_review");
+  });
+
+  it("does not repair a pending review stage when a newer review round was armed after the decision", async () => {
+    const { companyId, agentId, issueId, runId, stageId, wakeupRequestId } =
+      await seedInReviewParticipantRunFixture();
+    const executorId = randomUUID();
+    const decisionId = randomUUID();
+    const decisionCreatedAt = new Date("2026-03-19T00:01:00.000Z");
+    const newerRoundRequestedAt = new Date("2026-03-19T00:02:00.000Z");
+
+    await db.insert(agents).values({
+      id: executorId,
+      companyId,
+      name: "CodexImplementor",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.update(issues).set({
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId, userId: null },
+        returnAssignee: { type: "agent", agentId: executorId, userId: null },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: decisionId,
+        lastDecisionOutcome: "changes_requested",
+      },
+      executionPolicy: {
+        mode: "normal",
+        commentRequired: true,
+        stages: [{
+          id: stageId,
+          type: "review",
+          participants: [{ type: "agent", agentId, userId: null }],
+          approvalsNeeded: 1,
+        }],
+      },
+    }).where(eq(issues.id, issueId));
+
+    await db.insert(issueExecutionDecisions).values({
+      id: decisionId,
+      companyId,
+      issueId,
+      stageId,
+      stageType: "review",
+      actorAgentId: agentId,
+      actorUserId: null,
+      outcome: "changes_requested",
+      body: "request changes: fix the flaky test",
+      createdByRunId: runId,
+      createdAt: decisionCreatedAt,
+      updatedAt: decisionCreatedAt,
+    });
+
+    await db.update(heartbeatRuns).set({
+      status: "failed",
+      startedAt: new Date("2026-03-19T00:00:00.000Z"),
+      finishedAt: new Date("2026-03-19T00:05:00.000Z"),
+      updatedAt: new Date("2026-03-19T00:05:00.000Z"),
+      errorCode: "adapter_failed",
+      error: "round one review failed",
+    }).where(eq(heartbeatRuns.id, runId));
+    await db.update(agentWakeupRequests).set({
+      // A queued wake here would short-circuit the reconciler at
+      // hasQueuedIssueWake before reaching the requeue path; the guard reads
+      // requestedAt regardless of status, so a failed wake with a newer
+      // requestedAt still represents the armed round-2 signal under test.
+      status: "failed",
+      requestedAt: newerRoundRequestedAt,
+      updatedAt: newerRoundRequestedAt,
+    }).where(eq(agentWakeupRequests.id, wakeupRequestId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(result.reviewParticipantRepaired).toBe(0);
+    expect(result.reviewParticipantRequeued).toBe(1);
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_review");
+
+    const repairActivities = await db
+      .select()
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.entityId, issueId),
+          sql`${activityLog.details} ->> 'repairedDecisionId' = ${decisionId}`,
+        ),
+      );
+    expect(repairActivities).toHaveLength(0);
+  });
+
+  it("does not repair when the reviewer already started a newer run after the decision", async () => {
+    const { companyId, agentId, issueId, runId, wakeupRequestId, stageId } =
+      await seedInReviewParticipantRunFixture();
+    const executorId = randomUUID();
+    const decisionId = randomUUID();
+    const decisionCreatedAt = new Date("2026-03-19T00:01:00.000Z");
+    const newerRunStartedAt = new Date("2026-03-19T00:02:00.000Z");
+    const finishedAt = new Date("2026-03-19T00:05:00.000Z");
+
+    await db.insert(agents).values({
+      id: executorId,
+      companyId,
+      name: "CodexImplementor",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.update(issues).set({
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId, userId: null },
+        returnAssignee: { type: "agent", agentId: executorId, userId: null },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: decisionId,
+        lastDecisionOutcome: "changes_requested",
+      },
+      executionPolicy: {
+        mode: "normal",
+        commentRequired: true,
+        stages: [{
+          id: stageId,
+          type: "review",
+          participants: [{ type: "agent", agentId, userId: null }],
+          approvalsNeeded: 1,
+        }],
+      },
+    }).where(eq(issues.id, issueId));
+
+    await db.insert(issueExecutionDecisions).values({
+      id: decisionId,
+      companyId,
+      issueId,
+      stageId,
+      stageType: "review",
+      actorAgentId: agentId,
+      actorUserId: null,
+      outcome: "changes_requested",
+      body: "request changes: fix the flaky test",
+      createdByRunId: runId,
+      createdAt: decisionCreatedAt,
+      updatedAt: decisionCreatedAt,
+    });
+
+    await db.update(heartbeatRuns).set({
+      status: "failed",
+      startedAt: newerRunStartedAt,
+      finishedAt,
+      updatedAt: finishedAt,
+      errorCode: "adapter_failed",
+      error: "reviewer started a newer run after the decision",
+    }).where(eq(heartbeatRuns.id, runId));
+    await db.update(agentWakeupRequests).set({
+      status: "failed",
+      claimedAt: newerRunStartedAt,
+      finishedAt,
+      updatedAt: finishedAt,
+      error: "reviewer started a newer run after the decision",
+    }).where(eq(agentWakeupRequests.id, wakeupRequestId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(result.reviewParticipantRepaired).toBe(0);
+    expect(result.reviewParticipantRequeued).toBe(1);
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_review");
   });
 
   it.each([

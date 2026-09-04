@@ -5,7 +5,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/home/jamesilsley/.paperclip/machine-bin
-ExecStart=/usr/bin/python3 /home/jamesilsley/.paperclip/machine-bin/disposition_guard.py --enforce --allow-undecided-stage
+EnvironmentFile=/home/jamesilsley/.config/paperclip/box.env
+ExecStart=/usr/bin/python3 /home/jamesilsley/.paperclip/machine-bin/disposition_guard.py --enforce --allow-undecided-stage --api-base ${PAPERCLIP_API_URL}
 StandardOutput=append:/home/jamesilsley/.paperclip/disposition-guard-out.log
 StandardError=append:/home/jamesilsley/.paperclip/disposition-guard-err.log
 

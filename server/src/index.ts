@@ -79,6 +79,7 @@ import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { conflict } from "./errors.js";
 import { ensureDecisionSigningSecret } from "./services/decision-signing.js";
+import { initBuildReceiptKey } from "./services/build-receipt-signing.js";
 import { createDecisionRetentionNotifyOriginAgent, createDecisionWakeOriginAgent } from "./services/decision-wakeup.js";
 import {
   coordinateHeartbeatSchedulerShutdown,
@@ -1365,6 +1366,16 @@ export async function startServer(): Promise<StartedServer> {
     reconcileAdapterAvailability(parseAdapterRegistryEnv());
   } catch (err) {
     logger.error({ err }, "failed to reconcile adapter availability from PAPERCLIP_ADAPTERS");
+    throw err;
+  }
+
+  // SPA-5177 R3: hydrate the signing keypair from the DB (or mint + persist on
+  // first run). Must complete before the server accepts traffic -- otherwise
+  // the first receipt would sign with an uninitialized key. Fail loud.
+  try {
+    await initBuildReceiptKey(db);
+  } catch (err) {
+    logger.error({ err }, "failed to initialize build-receipt signing key");
     throw err;
   }
 

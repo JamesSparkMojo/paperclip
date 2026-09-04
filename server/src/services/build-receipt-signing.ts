@@ -35,6 +35,9 @@ import {
   verify as cryptoVerify,
   type KeyObject,
 } from "node:crypto";
+import { desc, eq } from "drizzle-orm";
+import type { Db } from "@paperclipai/db";
+import { buildReceiptSigningKeys } from "@paperclipai/db";
 
 export const SUPPORTED_ALG = "ed25519" as const;
 export type SigningAlg = typeof SUPPORTED_ALG;
@@ -166,22 +169,144 @@ export function loadBuildReceiptKey(input: {
   };
 }
 
-// Process-local cache: every server process holds exactly one key. Rotation
-// would re-mint and update this map; this is intentionally not a per-company
-// table today (R3's spec binds the key to the server, not the tenant).
+// Process-local cache of the active keypair, hydrated from the DB on startup.
+// The DB is the source of truth (key id stable across restarts -- the FATAL-4
+// fix); this cache is a hot path so sign() does not hit the DB per receipt.
+// Rotation / first-mint is written through to the DB, then re-hydrated here.
 let keyMaterialCache: BuildReceiptKeyMaterial | null = null;
+// Guards the async initializer so concurrent callers run it exactly once.
+let initPromise: Promise<BuildReceiptKeyMaterial> | null = null;
 
+// Build a BuildReceiptKeyMaterial from a stored DB row. The private key is
+// re-hydrated from its PKCS8 PEM so the server can keep signing.
+function materialFromRow(row: typeof buildReceiptSigningKeys.$inferSelect): BuildReceiptKeyMaterial {
+  const privateKey = createPrivateKey({ key: row.privateKeyPem, format: "pem" });
+  const publicKey = createPublicKey(privateKey);
+  const publicKeyDer = publicKey.export({ type: "spki", format: "der" }) as Buffer;
+  return {
+    alg: SUPPORTED_ALG,
+    keyId: row.keyId,
+    privateKey,
+    publicKey,
+    publicKeyDer,
+  };
+}
+
+// Fetch the active keypair row from the DB. Returns null when no key has ever
+// been persisted (first run). `isActive` is the rotation flag.
+async function loadActiveRow(db: Db): Promise<typeof buildReceiptSigningKeys.$inferSelect | null> {
+  const rows = await db
+    .select()
+    .from(buildReceiptSigningKeys)
+    .where(eq(buildReceiptSigningKeys.isActive, true))
+    .orderBy(desc(buildReceiptSigningKeys.createdAt))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+// Persist a freshly-minted keypair as the active key, demoting any prior
+// active key to inactive (so historic receipts still verify). Returns the
+// material for the new key.
+async function persistActiveKey(
+  db: Db,
+  material: BuildReceiptKeyMaterial,
+): Promise<BuildReceiptKeyMaterial> {
+  const publicKeyPem = material.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const publicKeyDer = material.publicKeyDer.toString("base64");
+  const privateKeyPem = material.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  // Demote the previous active key. A transaction keeps the single-active
+// invariant intact even under concurrent rotation.
+  await db.transaction(async (tx) => {
+    await tx
+      .update(buildReceiptSigningKeys)
+      .set({ isActive: false })
+      .where(eq(buildReceiptSigningKeys.isActive, true));
+    await tx.insert(buildReceiptSigningKeys).values({
+      keyId: material.keyId,
+      alg: SUPPORTED_ALG,
+      publicKeyPem,
+      publicKeyDer,
+      privateKeyPem,
+      isActive: true,
+    });
+  });
+  return material;
+}
+
+// Initialize the process-local key from the DB, minting + persisting on first
+// run. Idempotent and race-safe: concurrent callers await the same promise.
+// Call once at server startup (see wireBuildReceiptSigningKey) and after any
+// rotation. Tests call setBuildReceiptKey() to pin a deterministic key.
+export async function initBuildReceiptKey(db: Db): Promise<BuildReceiptKeyMaterial> {
+  if (keyMaterialCache) return keyMaterialCache;
+  if (!initPromise) {
+    initPromise = (async () => {
+      const row = await loadActiveRow(db);
+      const material = row ? materialFromRow(row) : await persistActiveKey(db, generateBuildReceiptKey());
+      keyMaterialCache = material;
+      return material;
+    })().catch((err) => {
+      // Reset so a later call can retry after a transient DB failure.
+      initPromise = null;
+      throw err;
+    });
+  }
+  return initPromise;
+}
+
+// Synchronous accessor for the hot path (sign()). Requires initBuildReceiptKey
+// to have resolved; throws if called before init so the failure is loud and
+// early rather than a silent wrong-key sign.
 export function getBuildReceiptKey(): BuildReceiptKeyMaterial {
-  if (!keyMaterialCache) keyMaterialCache = generateBuildReceiptKey();
+  if (!keyMaterialCache) {
+    throw new Error("build-receipt signing key not initialized -- call initBuildReceiptKey(db) at startup");
+  }
   return keyMaterialCache;
 }
 
-// Test/rotation hook -- replaces the process key. Returns the previous
+// Test/rotation hook -- replaces the process key in memory only. For a
+// persisted rotation, call rotateBuildReceiptKey instead. Returns the previous
 // material so a caller can rotate without losing the audit trail.
 export function setBuildReceiptKey(next: BuildReceiptKeyMaterial | null): BuildReceiptKeyMaterial | null {
   const previous = keyMaterialCache;
   keyMaterialCache = next;
   return previous;
+}
+
+// Public-key lookup by key id. The detector uses this to fetch the public side
+// of the key that signed a receipt (identified by signing_key_id) without the
+// private key ever leaving the server. Returns null for an unknown key id.
+export async function getSigningPublicKeyByKeyId(
+  db: Db,
+  keyId: string,
+): Promise<BuildReceiptKeyMaterial | null> {
+  const rows = await db
+    .select()
+    .from(buildReceiptSigningKeys)
+    .where(eq(buildReceiptSigningKeys.keyId, keyId))
+    .limit(1);
+  if (rows.length === 0) return null;
+  // Re-hydrate the public side only -- the private PEM is in the row but we do
+  // not need it to verify, and not loading it into memory here is one fewer
+  // place the secret can leak.
+  const publicKey = createPublicKey({ key: rows[0].publicKeyPem, format: "pem" });
+  const publicKeyDer = publicKey.export({ type: "spki", format: "der" }) as Buffer;
+  return {
+    alg: SUPPORTED_ALG,
+    keyId: rows[0].keyId,
+    privateKey: null as unknown as KeyObject, // never used for verify; typed loosely to reuse the shape
+    publicKey,
+    publicKeyDer,
+  };
+}
+
+// Fetch the active public key for external detectors (the signing-key route).
+export async function getActiveSigningPublicKey(
+  db: Db,
+): Promise<BuildReceiptKeyMaterial | null> {
+  const row = await loadActiveRow(db);
+  if (!row) return null;
+  return getSigningPublicKeyByKeyId(db, row.keyId);
 }
 
 // Sign a receipt. Returns the canonical bytes, the signature, the key id,

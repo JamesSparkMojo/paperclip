@@ -1471,6 +1471,13 @@
       "when": 1786020028000,
       "tag": "0211_build_receipt_signing_v1",
       "breakpoints": true
+    },
+    {
+      "idx": 212,
+      "version": "7",
+      "when": 1786020029000,
+      "tag": "0212_build_receipt_signing_keys",
+      "breakpoints": true
     }
   ]
 }

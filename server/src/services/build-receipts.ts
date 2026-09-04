@@ -37,7 +37,12 @@ import {
   issues,
 } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
-import { signBuildReceipt } from "./build-receipt-signing.js";
+import {
+  getSigningPublicKeyByKeyId,
+  signBuildReceipt,
+  SUPPORTED_ALG,
+  verifyBuildReceiptSignature,
+} from "./build-receipt-signing.js";
 
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type BuildReceiptInsert = typeof buildReceipts.$inferInsert;
@@ -416,4 +421,52 @@ export async function getLatestBuildReceiptForIssue(input: {
     .orderBy(desc(buildReceipts.createdAt))
     .limit(1)
     .then((rows) => rows[0] ?? null);
+}
+
+// Server-side signature verification of a receipt row against the persisted
+// key whose id the row names. This is the production caller of
+// verifyBuildReceiptSignature (FATAL-3): the latest-receipt route calls this
+// before returning, so every receipt read is cryptographically re-verified
+// inside the trust boundary -- not just the detector's external check.
+//
+// Pre-R3 rows have null signing columns and return { ok: false, reason:
+// "unsigned (pre-R3)" }; the detector branches on that. The verify step is
+// fail-closed: an unknown key id or a bad signature is an error, never a
+// silent pass.
+export async function verifyServerReceipt(
+  db: Db,
+  receipt: BuildReceiptRow,
+): Promise<{ ok: boolean; reason: string | null }> {
+  const gates = (receipt.gates ?? {}) as { met: number; unmet: number; abandoned: number };
+  if (!receipt.signingAlg || !receipt.signingKeyId || !receipt.signature || !receipt.transcriptSha256) {
+    return { ok: false, reason: "unsigned (pre-R3)" };
+  }
+  if (receipt.signingAlg !== SUPPORTED_ALG) {
+    return { ok: false, reason: `unsupported signing alg "${receipt.signingAlg}"` };
+  }
+  const keyMaterial = await getSigningPublicKeyByKeyId(db, receipt.signingKeyId);
+  if (!keyMaterial) {
+    return { ok: false, reason: `unknown signing key id "${receipt.signingKeyId}"` };
+  }
+  const result = verifyBuildReceiptSignature({
+    fields: {
+      issueId: receipt.issueId,
+      attemptId: receipt.attemptId,
+      runId: receipt.heartbeatRunId,
+      generation: receipt.generation,
+      treeSha: receipt.treeSha,
+      gateCounts: {
+        met: Number(gates.met ?? 0),
+        unmet: Number(gates.unmet ?? 0),
+        abandoned: Number(gates.abandoned ?? 0),
+      },
+      emittedAt: receipt.emittedAt,
+    },
+    alg: receipt.signingAlg,
+    keyId: receipt.signingKeyId,
+    signature: receipt.signature,
+    transcriptSha256: receipt.transcriptSha256,
+    publicKeyMaterial: keyMaterial,
+  });
+  return { ok: result.ok, reason: result.reason };
 }

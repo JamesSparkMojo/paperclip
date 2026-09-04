@@ -2564,6 +2564,17 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
+// SPA-5177 R3 public-key surface: the detector fetches the active signing
+// public key here to verify a real server-signed receipt. Only the public
+// side is ever returned; the private key never leaves the server boundary.
+registry.registerPath({
+  method: "get",
+  path: "/api/build-receipts/signing-key",
+  tags: ["issues"],
+  summary: "Get the active build-receipt signing public key",
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
 registry.registerPath({
   method: "get",
   path: "/api/companies/{companyId}/labels",

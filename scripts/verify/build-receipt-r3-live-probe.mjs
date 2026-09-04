@@ -13,7 +13,7 @@
 // Failure: prints "R3 LIVE PROBE FAIL: <reason>" and exits 1.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -128,7 +128,13 @@ async function main() {
   const work = mkdtempSync(join(tmpdir(), "build-receipt-r3-probe-"));
   const fixturesDir = join(work, "fixtures");
   const keyDir = join(work, "keys");
-  const detector = "/Users/jamesilsley/GitHub/sparkmojo-internal/.worktrees/SPA-5177-r3/platform/pm-team/process-reviews/detectors/build-receipt-check-v3.mjs";
+  // The COMMITTED detector (scripts/verify/build-receipt-check.mjs) -- the
+  // DoD-named reader. Relative to the repo root, so this probe runs in CI and
+  // any clone with no machine-specific absolute path (FATAL-2 fix).
+  const detector = join(repoRoot, "scripts", "verify", "build-receipt-check.mjs");
+  if (!existsSync(detector)) {
+    fail(`committed detector not found at ${detector} -- FATAL-2`);
+  }
   spawnSync("mkdir", ["-p", fixturesDir, keyDir]);
 
   try {

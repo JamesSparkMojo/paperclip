@@ -172,7 +172,11 @@ import {
 } from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
-import { getLatestBuildReceiptForIssue } from "../services/build-receipts.js";
+import {
+  getLatestBuildReceiptForIssue,
+  verifyServerReceipt,
+} from "../services/build-receipts.js";
+import { getActiveSigningPublicKey } from "../services/build-receipt-signing.js";
 import { decisionTrainingService } from "../services/decision-training.js";
 import { feedbackService } from "../services/feedback.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -12077,8 +12081,15 @@ export function issueRoutes(
     }
 
     const meta = (receipt.metadata ?? {}) as Record<string, unknown>;
+    // R3 production verification: re-verify the row's signature inside the
+    // trust boundary before returning. The detector's external check is the
+    // gate; this is the server-side proof the row has not been altered in the
+    // DB or in transit through the route layer.
+    const verification = await verifyServerReceipt(db, receipt);
     res.json({
-      v: 2,
+      v: 3,
+      signature_verified: verification.ok,
+      signature_verify_reason: verification.ok ? null : verification.reason,
       card: receipt.card,
       issue_id: receipt.issueId,
       run_id: receipt.heartbeatRunId,
@@ -12094,6 +12105,39 @@ export function issueRoutes(
       ledger_path: typeof meta["ledger_path"] === "string" ? meta["ledger_path"] : null,
       ledger_status: typeof meta["ledger_status"] === "string" ? meta["ledger_status"] : null,
       exit: receipt.exit,
+      // R3 surface: the four columns the detector re-derives and verifies.
+      // emitted_at is bound into the canonical payload, so a server-side
+      // pass can prove the receipt under audit matches what the server
+      // signed (transcript hash + signature + key id together).
+      emitted_at: receipt.emittedAt.toISOString(),
+      signing_alg: receipt.signingAlg ?? null,
+      signing_key_id: receipt.signingKeyId ?? null,
+      signature: receipt.signature ?? null,
+      transcript_sha256: receipt.transcriptSha256 ?? null,
+    });
+  });
+
+  // SPA-5177 R3 public-key surface: the signing public key, fetchable by the
+  // detector. Returns the active key's public PEM (+ key id + alg) so a
+  // detector can verify a real server-signed receipt without reading process
+  // memory. The private key NEVER leaves the server boundary -- it is not in
+  // this response, not in the DB row projection, and not logged anywhere.
+  // No issue access check: the key is a server-level trust anchor (same key
+  // for every issue in this deployment), not issue-scoped data.
+  router.get("/build-receipts/signing-key", async (_req, res) => {
+    const active = await getActiveSigningPublicKey(db);
+    if (!active) {
+      res.status(404).json({
+        error: "no signing key",
+        message: "no active build-receipt signing key is persisted yet",
+      });
+      return;
+    }
+    const publicKeyPem = active.publicKey.export({ type: "spki", format: "pem" }).toString();
+    res.json({
+      alg: active.alg,
+      key_id: active.keyId,
+      public_key_pem: publicKeyPem,
     });
   });
 

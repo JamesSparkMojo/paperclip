@@ -14,12 +14,16 @@
 //
 // What R1 deliberately does NOT do:
 //   * it does not modify reviewer-obedience gates (R2),
-//   * it does not sign the receipt (R3),
 //   * it does not fence concurrent attempts (R4),
 //   * it does not author adversarial fixtures (R5).
 //
-// If any of those are required, route to the matching card -- this file's
-// scope is the emitter and the read endpoint.
+// R3 (this file's current scope) DOES sign the receipt it emits: every
+// row carries a base64url Ed25519 signature, the algorithm name, a key id,
+// and a transcript hash. The signing key is held in process memory and
+// never leaves the server boundary. The detector (build-receipt-check.mjs)
+// re-derives the canonical payload from the row's signed fields, computes
+// the transcript hash, and verifies the signature; an unsigned or tampered
+// receipt REJECTs.
 
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -33,6 +37,12 @@ import {
   issues,
 } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
+import {
+  getSigningPublicKeyByKeyId,
+  signBuildReceipt,
+  SUPPORTED_ALG,
+  verifyBuildReceiptSignature,
+} from "./build-receipt-signing.js";
 
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type BuildReceiptInsert = typeof buildReceipts.$inferInsert;
@@ -310,6 +320,24 @@ export async function emitBuildReceiptForRun(input: {
   const remoteVerified = await verifyRemoteHasCommit(cwd, treeSha);
   const ledger = parseLedgerForIssue(cwd, readLedgerPathFromResult(run), card);
 
+  // R3: sign the canonical payload before persisting. The signing key is
+  // process-local; the signature, key id, algorithm, and transcript hash are
+  // the four columns the detector re-derives and verifies. emittedAt is
+  // bound into the canonical payload, so the receipt is bound to the
+  // wall-clock moment the server signed it -- not the run's finishedAt.
+  const emittedAt = new Date();
+  const signed = signBuildReceipt({
+    fields: {
+      issueId,
+      attemptId: run.id,
+      runId: run.id,
+      generation: 1,
+      treeSha,
+      gateCounts: ledger.counts,
+      emittedAt,
+    },
+  });
+
   const values: BuildReceiptInsert = {
     companyId: run.companyId,
     issueId,
@@ -333,6 +361,11 @@ export async function emitBuildReceiptForRun(input: {
       ledger_status: ledger.status,
       ledger_path: ledger.path,
     },
+    emittedAt,
+    signingAlg: signed.alg,
+    signingKeyId: signed.keyId,
+    signature: signed.signature,
+    transcriptSha256: signed.transcriptSha256,
   };
 
   // ON CONFLICT DO NOTHING -- a retry of the same run id (after a recovery
@@ -367,8 +400,10 @@ export async function emitBuildReceiptForRun(input: {
       remoteVerified,
       ledgerStatus: ledger.status,
       gates: ledger.counts,
+      signingKeyId: signed.keyId,
+      signatureShort: signed.signature.slice(0, 12),
     },
-    "build-receipts: emitted server-side BUILD-RECEIPT row",
+    "build-receipts: emitted server-side BUILD-RECEIPT row (signed)",
   );
   return { emitted: true, receipt: inserted, reason: "ok" };
 }
@@ -386,4 +421,52 @@ export async function getLatestBuildReceiptForIssue(input: {
     .orderBy(desc(buildReceipts.createdAt))
     .limit(1)
     .then((rows) => rows[0] ?? null);
+}
+
+// Server-side signature verification of a receipt row against the persisted
+// key whose id the row names. This is the production caller of
+// verifyBuildReceiptSignature (FATAL-3): the latest-receipt route calls this
+// before returning, so every receipt read is cryptographically re-verified
+// inside the trust boundary -- not just the detector's external check.
+//
+// Pre-R3 rows have null signing columns and return { ok: false, reason:
+// "unsigned (pre-R3)" }; the detector branches on that. The verify step is
+// fail-closed: an unknown key id or a bad signature is an error, never a
+// silent pass.
+export async function verifyServerReceipt(
+  db: Db,
+  receipt: BuildReceiptRow,
+): Promise<{ ok: boolean; reason: string | null }> {
+  const gates = (receipt.gates ?? {}) as { met: number; unmet: number; abandoned: number };
+  if (!receipt.signingAlg || !receipt.signingKeyId || !receipt.signature || !receipt.transcriptSha256) {
+    return { ok: false, reason: "unsigned (pre-R3)" };
+  }
+  if (receipt.signingAlg !== SUPPORTED_ALG) {
+    return { ok: false, reason: `unsupported signing alg "${receipt.signingAlg}"` };
+  }
+  const keyMaterial = await getSigningPublicKeyByKeyId(db, receipt.signingKeyId);
+  if (!keyMaterial) {
+    return { ok: false, reason: `unknown signing key id "${receipt.signingKeyId}"` };
+  }
+  const result = verifyBuildReceiptSignature({
+    fields: {
+      issueId: receipt.issueId,
+      attemptId: receipt.attemptId,
+      runId: receipt.heartbeatRunId,
+      generation: receipt.generation,
+      treeSha: receipt.treeSha,
+      gateCounts: {
+        met: Number(gates.met ?? 0),
+        unmet: Number(gates.unmet ?? 0),
+        abandoned: Number(gates.abandoned ?? 0),
+      },
+      emittedAt: receipt.emittedAt,
+    },
+    alg: receipt.signingAlg,
+    keyId: receipt.signingKeyId,
+    signature: receipt.signature,
+    transcriptSha256: receipt.transcriptSha256,
+    publicKeyMaterial: keyMaterial,
+  });
+  return { ok: result.ok, reason: result.reason };
 }

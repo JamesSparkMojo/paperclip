@@ -2547,18 +2547,33 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
-// SPA-5175 R1: build-receipt reader. The receipt row is server-emitted on the
-// run-finished lifecycle hook (heartbeat.ts), never builder-posted; this is
-// the read side of that contract (see ADR-0058 Decision 5 Phase 2).
+// SPA-5175 R1 / SPA-5177 R3: build-receipt reader. The receipt row is
+// server-emitted on the run-finished lifecycle hook (heartbeat.ts), never
+// builder-posted. R3 bumps the response schema to v=3 and adds four signing
+// columns: emitted_at, signing_alg, signing_key_id, signature,
+// transcript_sha256. The detector (build-receipt-check.mjs) recomputes the
+// transcript hash from the row's signed fields, verifies the signature
+// against the matching public key, and rejects the receipt if any of the
+// four are missing or do not match (see ADR-0058 Decision 5 Phase 2 R3).
 registry.registerPath({
   method: "get",
   path: "/api/issues/{id}/build-receipts/latest",
   tags: ["issues"],
-  summary: "Get the latest server-emitted build receipt for an issue",
+  summary: "Get the latest server-emitted, signed build receipt for an issue",
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
+// SPA-5177 R3 public-key surface: the detector fetches the active signing
+// public key here to verify a real server-signed receipt. Only the public
+// side is ever returned; the private key never leaves the server boundary.
+registry.registerPath({
+  method: "get",
+  path: "/api/build-receipts/signing-key",
+  tags: ["issues"],
+  summary: "Get the active build-receipt signing public key",
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
 registry.registerPath({
   method: "get",
   path: "/api/companies/{companyId}/labels",

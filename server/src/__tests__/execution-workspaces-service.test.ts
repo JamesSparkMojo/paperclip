@@ -3166,16 +3166,21 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
         healthStatus: "unknown",
       },
     ]);
+    // SPA-5926: only one issue may be open per execution_workspace_id (partial index
+    // issues_execution_workspace_id_open_uniq: WHERE status NOT IN ('done','cancelled') AND
+    // execution_workspace_id IS NOT NULL). Seed 1 open + 4 done so the workspace overview
+    // summary still covers 5 visible linked issues but the partial index never sees a duplicate.
     await db.insert(issues).values(
       Array.from({ length: 5 }, (_, index) => ({
         id: randomUUID(),
         companyId,
         projectId,
         title: `Linked issue ${index + 1}`,
-        status: "todo",
+        status: index === 0 ? "todo" : "done",
         priority: "medium",
         identifier: `PAP-${index + 1}`,
         executionWorkspaceId: workspaceAId,
+        completedAt: index === 0 ? null : new Date("2026-06-03T09:00:00.000Z"),
         updatedAt: new Date(`2026-06-03T09:0${index}:00.000Z`),
       })),
     );
@@ -3184,9 +3189,12 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       companyId,
       projectId,
       title: "Hidden linked issue",
-      status: "todo",
+      // SPA-5926: hidden row can be closed — still excluded from linked counts via hiddenAt,
+      // but must also be excluded from the partial unique index.
+      status: "done",
       priority: "medium",
       executionWorkspaceId: workspaceAId,
+      completedAt: new Date("2026-06-03T11:00:00.000Z"),
       hiddenAt: new Date("2026-06-03T11:00:00.000Z"),
     });
 
@@ -3232,6 +3240,92 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       "Linked issue 3",
       "Linked issue 2",
     ]);
+  });
+
+  // SPA-5926 R2: negative test — constraint refuses two OPEN issues sharing a workspace
+  it("refuses to bind two open issues to the same execution workspace (issues_execution_workspace_id_open_uniq)", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const workspaceId = randomUUID();
+    const openStatuses: Array<"todo" | "in_progress" | "blocked" | "backlog"> = ["todo", "in_progress", "blocked"];
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "R2 constraint guard",
+      status: "in_progress",
+    });
+    await db.insert(executionWorkspaces).values({
+      id: workspaceId,
+      companyId,
+      projectId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "Bound workspace",
+      status: "active",
+      providerType: "git_worktree",
+    });
+    await db.insert(issues).values({
+      id: randomUUID(),
+      companyId,
+      projectId,
+      title: "First open issue on workspace",
+      status: openStatuses[1],
+      priority: "medium",
+      identifier: "PAP-1",
+      executionWorkspaceId: workspaceId,
+    });
+
+    // Second open issue on the same workspace must be rejected at the DB layer.
+    // The DB error surfaces as a PostgresError wrapped by DrizzleQueryError.cause;
+    // the constraint name is on `constraint_name` (not `constraint`), and the SQLSTATE
+    // is 23505. Assert on both so the test fails loudly if the partial index ever
+    // disappears or its predicate drifts.
+    await expect(
+      db.insert(issues).values({
+        id: randomUUID(),
+        companyId,
+        projectId,
+        title: "Second open issue on workspace",
+        status: openStatuses[0],
+        priority: "medium",
+        identifier: "PAP-2",
+        executionWorkspaceId: workspaceId,
+      }),
+    ).rejects.toMatchObject({
+      cause: expect.objectContaining({
+        code: "23505",
+        constraint_name: "issues_execution_workspace_id_open_uniq",
+        message: expect.stringContaining("issues_execution_workspace_id_open_uniq"),
+      }),
+    });
+
+    // Sanity: same workspace is OK once the first holder is terminal (done/cancelled excluded from index).
+    await db
+      .update(issues)
+      .set({ status: "done" as const, completedAt: new Date("2026-06-03T12:00:00.000Z") })
+      .where(
+        // locate the first row by its workspace binding
+        eq(issues.executionWorkspaceId, workspaceId),
+      );
+    await expect(
+      db.insert(issues).values({
+        id: randomUUID(),
+        companyId,
+        projectId,
+        title: "Reuses workspace once holder is terminal",
+        status: "todo",
+        priority: "medium",
+        identifier: "PAP-3",
+        executionWorkspaceId: workspaceId,
+      }),
+    ).resolves.toBeDefined();
   });
 
   it("supports status and project filters with stable limit/offset pagination", async () => {

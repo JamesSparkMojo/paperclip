@@ -1,0 +1,14 @@
+-- SPA-5918 / SPA-5838: partial unique index on open issues.execution_workspace_id (R2)
+--
+-- File number 0231 (was 0210 in the integration branch — 0212 renumber collided with upstream v2026.831.0's 0212_onboarding_first_task_unique.sql; 0231 sits after upstream 831 max 0230, so upgrade will not collide).
+-- Journal when: 1786259180528 — strictly AFTER upstream 0211 (when=1786129601533) and strictly BEFORE upstream 0212 (when=1786388759523). Window makes this apply now on 817 and shadow nothing on 831 upgrade (journal entry already applied; upstream 0212..0230 still apply on top). Codex review P1 fix: 0231 avoids the 0212 duplicate-number gate that would block 831.
+--
+-- paperclip:migration-safety-ignore large-create-index-not-concurrently: Drizzle migrations run transactionally; CONCURRENTLY is unavailable. A one-time build lock is the lesser cost vs silent allocator regressions (SPA-5693 had to null 172 poisoned cards by hand).
+--
+-- Idempotent: CREATE UNIQUE INDEX IF NOT EXISTS. The index already exists on the live DB from the rolled-back deploy (rows 212/213 in drizzle.__drizzle_migrations recreated it then the code rollback left the index in place). On a fresh DB this creates it; on a DB that already carries it, this is a no-op.
+--
+-- Fails loud on legacy poisoned rows: CREATE UNIQUE INDEX aborts if any two open issues already share an execution_workspace_id. That is the intended behavior — the constraint must not silently skip pre-existing corruption. Run the SPA-5693-style detach (null the later card's execution_workspace_id so it reallocates a fresh workspace) on any environment carrying duplicates, then re-run migrate.
+--
+-- Forward: as below.
+-- Rollback (out-of-band): DROP INDEX IF EXISTS issues_execution_workspace_id_open_uniq; — no data loss.
+CREATE UNIQUE INDEX IF NOT EXISTS "issues_execution_workspace_id_open_uniq" ON "issues" USING btree ("execution_workspace_id") WHERE "execution_workspace_id" IS NOT NULL AND "status" NOT IN ('done', 'cancelled');
